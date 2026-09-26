@@ -1,6 +1,6 @@
 use crate::{
     config::{Config, NetBox},
-    dns::{self, InternalRecord, Records},
+    dns::{self, Records, Zone},
 };
 use anyhow::{Context, Result, ensure};
 use reqwest::{
@@ -175,7 +175,7 @@ impl Source {
             let mut seen_pages = BTreeSet::new();
             let mut ids = BTreeSet::new();
             let mut expected = None;
-            let mut internal_records = Vec::new();
+            let mut zone_records = Vec::new();
             while let Some(page_url) = url {
                 ensure!(
                     seen_pages.insert(page_url.as_str().to_owned()),
@@ -206,25 +206,22 @@ impl Source {
                     );
                     ensure!(ids.len() <= self.max_records, "record limit exceeded");
                     if r.active {
-                        internal_records.push(InternalRecord {
-                            name: r.fqdn,
-                            ttl: r
-                                .ttl
+                        zone_records.push(dns::parse_record(
+                            &api_zone.name,
+                            &r.fqdn,
+                            r.ttl
                                 .or(api_zone.default_ttl)
                                 .context("record and zone both lack an effective TTL")?,
-                            rr_type: r.kind,
-                            value: r.absolute_value.unwrap_or(r.value),
-                        });
+                            &r.kind,
+                            r.absolute_value.as_deref().unwrap_or(&r.value),
+                        )?);
                     }
                 }
                 url = page.next.map(|u| page_url.join(&u)).transpose()?;
             }
             ensure!(Some(ids.len()) == expected, "incomplete pagination");
-            let normalized = dns::canonicalize(&api_zone.name, internal_records)?;
-            records.insert(
-                dns::sanitize_zone_id_for_filename(&api_zone.name)?,
-                normalized,
-            );
+            let zone = Zone::new(&api_zone.name, zone_records)?;
+            records.insert(dns::sanitize_zone_id_for_filename(&api_zone.name)?, zone);
         }
         Ok(records)
     }

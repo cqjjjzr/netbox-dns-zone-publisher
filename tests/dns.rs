@@ -1,12 +1,8 @@
-use netbox_dns_zone_publisher::dns::{self, InternalRecord};
+use domain::zonefile::inplace::ScannedRecord;
+use netbox_dns_zone_publisher::dns::{self, Zone};
 
-fn record(name: &str, ttl: u32, kind: &str, value: &str) -> InternalRecord {
-    InternalRecord {
-        name: name.into(),
-        ttl,
-        rr_type: kind.into(),
-        value: value.into(),
-    }
+fn record(name: &str, ttl: u32, kind: &str, value: &str) -> ScannedRecord {
+    dns::parse_record("example.com", name, ttl, kind, value).unwrap()
 }
 
 #[test]
@@ -18,62 +14,54 @@ fn normalization_ignores_source_serial_order_and_duplicate_records() {
         "ns.example.com. hostmaster.example.com. 123 3600 600 86400 300",
     );
     let address = record("WWW.Example.COM.", 0, "A", "192.0.2.1");
-    let before = dns::canonicalize(
+    let before = Zone::new(
         "EXAMPLE.COM",
         vec![soa.clone(), address.clone(), address.clone()],
     )
     .unwrap();
-    let mut bumped = soa;
-    bumped.value = bumped.value.replace("123", "999");
-    let after = dns::canonicalize("example.com.", vec![address, bumped]).unwrap();
+    let bumped = record(
+        "@",
+        300,
+        "SOA",
+        "ns.example.com. hostmaster.example.com. 999 3600 600 86400 300",
+    );
+    let after = Zone::new("example.com.", vec![address, bumped]).unwrap();
     assert_eq!(before, after);
-    assert_eq!(before.records.len(), 2);
     assert_eq!(before.name, "example.com.");
     assert!(
         before
-            .records
-            .iter()
-            .any(|r| r.name == "www.example.com." && r.ttl == 0)
+            .comparison_text()
+            .contains("www.example.com. 0 IN A 192.0.2.1\n")
     );
-    let scanned = dns::internal_to_scanned_records(&before.name, &before.records).unwrap();
-    assert_eq!(dns::soa_serial(&before.name, &scanned).unwrap(), 0);
-    let rendered = dns::render_with_serial(&before.name, scanned, 2026092601).unwrap();
+    let rendered = before.render_with_serial(2026092601);
+    let reloaded = Zone::new(&before.name, dns::parse(&before.name, &rendered).unwrap()).unwrap();
+    assert_eq!(reloaded.records.len(), 2);
     assert_eq!(
-        dns::soa_serial(&before.name, &dns::parse(&before.name, &rendered).unwrap()).unwrap(),
+        dns::soa_serial(&before.name, &reloaded.records).unwrap(),
         2026092601
     );
+    assert_eq!(before, reloaded);
+    assert_eq!(dns::soa_serial(&before.name, &before.records).unwrap(), 123);
+    assert_eq!(dns::soa_serial(&after.name, &after.records).unwrap(), 999);
 }
 
 #[test]
 fn txt_binary_octets_and_generic_rdata_survive_rendering() {
     let records = vec![
-        record("txt", 0, "TXT", r#""a\000\255" "quote\"slash\\" """#),
+        record("txt", 0, "TXT", r#""MiXeD\000\255" "quote\"slash\\" """#),
         record("opaque", 300, "TYPE65280", r"\# 4 00ffabcd"),
         record("@", 300, "MX", "10 mail"),
+        record(r"a\032b", 300, "A", "192.0.2.1"),
     ];
-    let normalized = dns::canonicalize("example.com", records).unwrap();
-    let rendered = dns::render_with_serial(
-        "example.com",
-        dns::internal_to_scanned_records("example.com", &normalized.records).unwrap(),
-        1,
-    )
-    .unwrap();
+    let zone = Zone::new("example.com", records).unwrap();
+    let rendered = zone.render_with_serial(1);
     assert!(dns::final_matches_unsigned("example.com", &rendered, &rendered).unwrap());
-    assert!(
-        normalized
-            .records
-            .iter()
-            .any(|r| r.value == "10 mail.example.com.")
-    );
-    let text = normalized
-        .records
-        .iter()
-        .find(|r| r.rr_type == "TXT")
-        .unwrap();
-    assert!(text.value.contains(r"\000"));
-    assert!(text.value.contains(r"\255"));
-    let again = dns::canonicalize("example.com", normalized.records.clone()).unwrap();
-    assert_eq!(again, normalized);
+    assert!(rendered.contains("10 mail.example.com."));
+    assert!(rendered.contains(r"MiXeD\000\255"));
+    assert!(rendered.contains(r"a\ b.example.com."));
+    let again = Zone::new("example.com", dns::parse("example.com", &rendered).unwrap()).unwrap();
+    assert_eq!(again, zone);
+    assert_eq!(again.render_with_serial(1), rendered);
 }
 
 #[test]
@@ -96,9 +84,7 @@ fn source_policy_rejects_out_of_zone_dnssec_and_inconsistent_rrset_ttls() {
         ),
     ];
     for (records, expected) in cases {
-        let error = dns::canonicalize("example.com", records)
-            .unwrap_err()
-            .to_string();
+        let error = Zone::new("example.com", records).unwrap_err().to_string();
         assert!(error.contains(expected), "{error}");
     }
 }
@@ -115,10 +101,10 @@ fn delegation_accepts_supplied_glue_but_rejects_occluded_records() {
             "12345 13 2 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
         ),
     ];
-    dns::canonicalize("example.com", records.clone()).unwrap();
+    Zone::new("example.com", records.clone()).unwrap();
     records.push(record("www.child", 300, "A", "192.0.2.2"));
     assert!(
-        dns::canonicalize("example.com", records)
+        Zone::new("example.com", records)
             .unwrap_err()
             .to_string()
             .contains("non-glue data below delegation")
@@ -128,16 +114,17 @@ fn delegation_accepts_supplied_glue_but_rejects_occluded_records() {
 #[test]
 fn untrusted_rows_cannot_inject_records_or_include_files() {
     let cases = [
-        record("www\nother", 300, "A", "192.0.2.1"),
-        record("www", 300, "A IN", "192.0.2.1"),
-        record("www", 300, "A", "192.0.2.1\nother 300 IN A 192.0.2.2"),
-        record("www", 300, "A", "192.0.2.1\n$INCLUDE /does/not/exist"),
-        record("@", 300, "AXFR", ""),
+        ("www\nother", 300, "A", "192.0.2.1"),
+        ("www", 300, "A IN", "192.0.2.1"),
+        ("www", 300, "A", "192.0.2.1\nother 300 IN A 192.0.2.2"),
+        ("www", 300, "A", "192.0.2.1\n$INCLUDE /does/not/exist"),
+        ("@", 300, "AXFR", ""),
+        ("www 301 CH A 192.0.2.1 ;", 300, "A", "192.0.2.2"),
     ];
-    for row in cases {
+    for (name, ttl, kind, value) in cases {
         assert!(
-            dns::canonicalize("example.com", vec![row.clone()]).is_err(),
-            "accepted {row:?}"
+            dns::parse_record("example.com", name, ttl, kind, value).is_err(),
+            "accepted {name} {ttl} {kind} {value}"
         );
     }
     assert!(
@@ -149,7 +136,7 @@ fn untrusted_rows_cannot_inject_records_or_include_files() {
 }
 
 #[test]
-fn final_zone_may_add_signatures_but_must_preserve_records_ttls_and_serial() {
+fn final_zone_may_add_signatures_but_must_preserve_records_ttls_class_and_serial() {
     let unsigned = "@ 300 IN SOA ns hostmaster 123 3600 600 86400 300\nwww 300 IN A 192.0.2.1\n";
     let signed = format!("{unsigned}@ 300 IN DNSKEY 257 3 13 AQID\n");
     assert!(dns::final_matches_unsigned("example.com", unsigned, &signed).unwrap());
@@ -157,6 +144,7 @@ fn final_zone_may_add_signatures_but_must_preserve_records_ttls_and_serial() {
         signed.replace("192.0.2.1", "192.0.2.2"),
         signed.replace("www 300", "www 301"),
         signed.replace("123", "124"),
+        signed.replace(" IN ", " CH "),
         signed.replace("www 300 IN A 192.0.2.1\n", ""),
     ] {
         assert!(

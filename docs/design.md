@@ -33,9 +33,9 @@ Collection checks cover record IDs, zone IDs, page counts, pagination cycles and
 
 ## DNS representation and checks
 
-The publisher uses the `domain` crate to parse and format zone records. It stores sorted, deduplicated `InternalRecord` values in JSON and converts them to typed records for rendering. Supported RFC 3597 data and TXT byte escapes pass through the same parser and formatter.
+The publisher uses the `domain` crate to parse and format zone records. It retains typed records in memory and uses unsigned zone files as snapshots. Rendering sorts and deduplicates records. Supported RFC 3597 data and TXT byte escapes pass through the same parser and formatter.
 
-Normalization sets the source SOA serial to zero. A NetBox serial change alone therefore leaves the normalized collection unchanged. The publisher assigns the output serial from its own ledger.
+Comparison renders the SOA serial as zero without changing the retained records. A NetBox serial change alone therefore leaves the normalized collection unchanged. The publisher assigns the output serial from its own ledger.
 
 Source checks reject out-of-zone owners, inconsistent TTLs within an RRset, generated DNSSEC records and non-glue data below a delegation. At a delegation, the publisher accepts NS and DS records, plus A/AAAA glue for the named servers. It does not require missing glue. `named-checkzone -q -i local` checks the rendered zone before storage, including its SOA and NS structure.
 
@@ -47,8 +47,7 @@ A collection covers the configured zone set with one shared serial. For each zon
 
 | File | Purpose |
 | --- | --- |
-| `<zone>.json` | Normalized NetBox records for comparison and record diffs. |
-| `<zone>.unsigned.zone` | Authoritative unsigned records with the release serial; source for an offline refresh. |
+| `<zone>.unsigned.zone` | Authoritative snapshot with the release serial; source for comparisons, record diffs and offline refresh. |
 | `<zone>.zone` | Final bytes for deployment, including signatures for a signed zone. |
 | `collection.json` | One manifest per collection, with its ID, serial, timestamp, source URL/view, zones, reasons and configuration hash. |
 

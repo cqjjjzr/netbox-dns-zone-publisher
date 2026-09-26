@@ -30,6 +30,27 @@ fn collect_publish_noop_change_and_repair_preserve_release_history() {
     let initial_package = fixture.package();
     let initial_zone = fs::read(initial_package.join("example.com.zone")).unwrap();
     let initial_manifest = fixture.manifest();
+    let mut files: Vec<_> = fs::read_dir(&initial_package)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    files.sort();
+    assert_eq!(
+        files,
+        [
+            "collection.json",
+            "example.com.unsigned.zone",
+            "example.com.zone",
+            "example.net.unsigned.zone",
+            "example.net.zone",
+        ]
+    );
+    for name in ["example.com", "example.net"] {
+        assert_eq!(
+            fs::read(initial_package.join(format!("{name}.unsigned.zone"))).unwrap(),
+            fs::read(initial_package.join(format!("{name}.zone"))).unwrap(),
+        );
+    }
     assert_eq!(
         initial_manifest["zones"],
         json!(["example.com.", "example.net."])
@@ -318,7 +339,10 @@ fn signed_refresh_uses_fresh_records_online_and_retained_unsigned_files_offline(
     )
     .unwrap();
     publisher::collect(&fixture.config).unwrap();
-    assert_eq!(fixture.manifest()["reasons"], json!(["signature refresh"]));
+    assert_eq!(
+        fixture.manifest()["reasons"],
+        json!(["initial publication for example.com"])
+    );
     assert_ne!(fs::read(&calls).unwrap(), signed_once);
 
     fixture.make_refresh_due();
@@ -440,4 +464,154 @@ fn default_bind_program_names_are_resolved_from_path() {
         );
     }
     assert_published(&fixture, "example.com");
+}
+
+#[test]
+fn ttl_only_change_creates_a_release_and_diff_after_reloading_unsigned_records() {
+    let api = Api::new(&["example.com"]);
+    let fixture = Sandbox::new(api.server.url.clone(), &["example.com"]);
+    publisher::collect(&fixture.config).unwrap();
+    let previous = fixture.pointer();
+    api.state
+        .lock()
+        .unwrap()
+        .records
+        .get_mut("example.com")
+        .unwrap()[3]["ttl"] = json!(301);
+    publisher::collect(&fixture.config).unwrap();
+    assert!(
+        fixture.pointer()["last_serial"].as_u64().unwrap()
+            > previous["last_serial"].as_u64().unwrap()
+    );
+    let reasons = fixture.manifest()["reasons"].to_string();
+    assert!(
+        reasons.contains("-www.example.com. 300 IN A 192.0.2.10"),
+        "{reasons}"
+    );
+    assert!(
+        reasons.contains("+www.example.com. 301 IN A 192.0.2.10"),
+        "{reasons}"
+    );
+    let changed = fixture.pointer();
+    publisher::collect(&fixture.config).unwrap();
+    assert_eq!(fixture.pointer(), changed);
+}
+
+#[test]
+fn invalid_unsigned_snapshot_cannot_refresh_offline_but_rebuilds_from_netbox() {
+    for invalid in ["invalid retained zone", "outside.net. 300 IN A 192.0.2.1\n"] {
+        let api = Api::new(&["example.com"]);
+        let mut fixture = Sandbox::new(api.server.url.clone(), &["example.com"]);
+        fixture.enable_signing();
+        publisher::collect(&fixture.config).unwrap();
+        fixture.make_refresh_due();
+        let previous = fixture.pointer();
+        let old_package = fixture.package();
+        fs::write(old_package.join("example.com.unsigned.zone"), invalid).unwrap();
+        api.state.lock().unwrap().unavailable = true;
+        assert_error(publisher::collect(&fixture.config), "HTTP 503");
+        assert_eq!(fixture.pointer(), previous);
+        api.state.lock().unwrap().unavailable = false;
+        publisher::collect(&fixture.config).unwrap();
+        assert_eq!(
+            fixture.manifest()["reasons"],
+            json!(["initial publication for example.com"])
+        );
+        assert!(
+            fixture.pointer()["last_serial"].as_u64().unwrap()
+                > previous["last_serial"].as_u64().unwrap()
+        );
+        assert_eq!(
+            fs::read_to_string(old_package.join("example.com.unsigned.zone")).unwrap(),
+            invalid
+        );
+    }
+}
+
+#[test]
+fn offline_refresh_rejects_a_retained_serial_above_the_next_allocation() {
+    let api = Api::new(&["example.com"]);
+    let mut fixture = Sandbox::new(api.server.url.clone(), &["example.com"]);
+    fixture.enable_signing();
+    publisher::collect(&fixture.config).unwrap();
+    fixture.make_refresh_due();
+    let previous = fixture.pointer();
+    let path = fixture.package().join("example.com.unsigned.zone");
+    let text = fs::read_to_string(&path).unwrap();
+    let zone = dns::Zone::new("example.com", dns::parse("example.com", &text).unwrap()).unwrap();
+    fs::write(&path, zone.render_with_serial(u32::MAX)).unwrap();
+    api.state.lock().unwrap().unavailable = true;
+    assert_error(
+        publisher::collect(&fixture.config),
+        "source SOA serial is not older",
+    );
+    assert_eq!(fixture.pointer(), previous);
+    assert_eq!(
+        fs::read_dir(fixture.config.state_dir.join("collected"))
+            .unwrap()
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn offline_edits_become_the_snapshot_and_are_replaced_when_netbox_returns() {
+    let api = Api::new(&["example.com"]);
+    let mut fixture = Sandbox::new(api.server.url.clone(), &["example.com"]);
+    fixture.enable_signing();
+    publisher::collect(&fixture.config).unwrap();
+    fixture.make_refresh_due();
+    let old_package = fixture.package();
+    let path = old_package.join("example.com.unsigned.zone");
+    let edited = fs::read_to_string(&path)
+        .unwrap()
+        .replace("192.0.2.10", "192.0.2.77");
+    fs::write(&path, &edited).unwrap();
+    api.state.lock().unwrap().unavailable = true;
+    publisher::collect(&fixture.config).unwrap();
+    assert_ne!(fixture.package(), old_package);
+    assert_eq!(fs::read_to_string(path).unwrap(), edited);
+    assert!(
+        fs::read_to_string(fixture.package().join("example.com.unsigned.zone"))
+            .unwrap()
+            .contains("192.0.2.77")
+    );
+    publisher::publish(&fixture.config).unwrap();
+    assert_published(&fixture, "example.com");
+
+    api.state.lock().unwrap().unavailable = false;
+    publisher::collect(&fixture.config).unwrap();
+    let reasons = fixture.manifest()["reasons"].to_string();
+    assert!(
+        reasons.contains("-www.example.com. 300 IN A 192.0.2.77"),
+        "{reasons}"
+    );
+    assert!(
+        reasons.contains("+www.example.com. 300 IN A 192.0.2.10"),
+        "{reasons}"
+    );
+    publisher::publish(&fixture.config).unwrap();
+    assert_published(&fixture, "example.com");
+}
+
+#[test]
+fn malformed_unsigned_zone_does_not_block_other_zones_during_publication() {
+    let api = Api::new(&["example.com", "example.net"]);
+    let fixture = Sandbox::new(api.server.url.clone(), &["example.com", "example.net"]);
+    publisher::collect(&fixture.config).unwrap();
+    fs::write(
+        fixture.package().join("example.com.unsigned.zone"),
+        "invalid retained zone",
+    )
+    .unwrap();
+    let output = fixture.cli("publish");
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("Rejecting example.com"));
+    assert!(
+        !fixture.config.targets[0]
+            .directory
+            .join("example.com.zone")
+            .exists()
+    );
+    assert_published(&fixture, "example.net");
 }

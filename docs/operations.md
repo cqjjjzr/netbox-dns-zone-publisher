@@ -95,7 +95,6 @@ state_dir/
 └── collected/
     └── <collection-id>/
         ├── collection.json
-        ├── example.com.json
         ├── example.com.unsigned.zone
         └── example.com.zone
 ```

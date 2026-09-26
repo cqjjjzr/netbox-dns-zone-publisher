@@ -39,21 +39,10 @@ fn paginated_collection_authenticates_and_uses_effective_ttls_and_absolute_value
         .unwrap();
     let zone = &records["example.com"];
     assert_eq!(zone.records.len(), 5);
-    assert!(
-        zone.records
-            .iter()
-            .any(|r| r.name == "www.example.com." && r.ttl == 0)
-    );
-    assert!(
-        zone.records
-            .iter()
-            .any(|r| r.rr_type == "NS" && r.ttl == 300)
-    );
-    assert!(
-        zone.records
-            .iter()
-            .any(|r| r.rr_type == "CNAME" && r.value == "www.example.com.")
-    );
+    let text = zone.comparison_text();
+    assert!(text.contains("www.example.com. 0 IN A 192.0.2.10\n"));
+    assert!(text.contains("example.com. 300 IN NS ns.example.com.\n"));
+    assert!(text.contains("alias.example.com. 300 IN CNAME www.example.com.\n"));
     let requests = server.requests.lock().unwrap();
     assert_eq!(requests.len(), 4);
     assert!(requests[1].target.contains("name=example.com&view_id=1"));
@@ -162,13 +151,15 @@ fn active_records_need_an_effective_ttl() {
 
 #[test]
 fn stable_reads_ignore_order_and_source_serial_but_reject_content_changes() {
-    for changed in [false, true] {
+    for change in ["none", "address", "ttl"] {
         let first = zone_records(1, "example.com");
         let mut second = first.clone();
         second[0]["value"] =
             json!("ns.example.com. hostmaster.example.com. 999 3600 600 86400 300");
-        if changed {
-            second[3]["value"] = json!("192.0.2.99");
+        match change {
+            "address" => second[3]["value"] = json!("192.0.2.99"),
+            "ttl" => second[3]["ttl"] = json!(301),
+            _ => {}
         }
         second.reverse();
         let mut pages = scoped_pages(page(first));
@@ -178,7 +169,7 @@ fn stable_reads_ignore_order_and_source_serial_but_reject_content_changes() {
         let result = Source::new(&fixture.config.netbox)
             .unwrap()
             .stable(&fixture.config);
-        if changed {
+        if change != "none" {
             assert_error(result, "source records changed between collections");
         } else {
             assert!(result.is_ok());

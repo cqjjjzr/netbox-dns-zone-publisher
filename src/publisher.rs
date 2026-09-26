@@ -112,26 +112,19 @@ fn read_collection(
     let mut finals = ZoneFiles::new();
     for name in &package.collection.zones {
         let zone_id = dns::sanitize_zone_id_for_filename(name)?;
+        let unsigned = util::bounded_read(fs::File::open(
+            directory.join(format!("{zone_id}.unsigned.zone")),
+        )?)?;
+        let unsigned = String::from_utf8(unsigned)?;
         if load_records {
-            let bytes =
-                util::bounded_read(fs::File::open(directory.join(format!("{zone_id}.json")))?)?;
-            let zone: Zone = serde_json::from_slice(&bytes)?;
-            ensure!(
-                zone.name == dns::canonicalize_name(name)?,
-                "collection zone identity mismatch"
-            );
+            let zone = Zone::new(name, dns::parse(name, &unsigned)?)?;
             ensure!(
                 records.insert(zone_id.clone(), zone).is_none(),
                 "duplicate collection zone"
             );
         }
-        let unsigned = util::bounded_read(fs::File::open(
-            directory.join(format!("{zone_id}.unsigned.zone")),
-        )?)?;
         ensure!(
-            unsigneds
-                .insert(zone_id.clone(), String::from_utf8(unsigned)?)
-                .is_none(),
+            unsigneds.insert(zone_id.clone(), unsigned).is_none(),
             "duplicate collection zone"
         );
         let contents =
@@ -286,29 +279,22 @@ fn next_collection_id(root: &std::path::Path) -> Result<u64> {
 fn prepare_zone_files(
     c: &Config,
     records: &Records,
-    previous_unsigneds: Option<&ZoneFiles>,
+    offline_refresh: bool,
     serial: u32,
 ) -> Result<(ZoneFiles, ZoneFiles)> {
     let mut unsigneds = ZoneFiles::new();
     let mut finals = ZoneFiles::new();
     for zone in &c.zones {
         let id = dns::sanitize_zone_id_for_filename(&zone.name)?;
-        let scanned_records = if let Some(previous_unsigneds) = previous_unsigneds {
-            let previous = previous_unsigneds
-                .get(&id)
-                .context("missing previous unsigned zone")?;
-            let parsed_records = dns::parse(&zone.name, previous)?;
-            let previous_serial = dns::soa_serial(&zone.name, &parsed_records)?;
+        let zone_data = records.get(&id).context("missing configured zone")?;
+        if offline_refresh {
+            let previous_serial = dns::soa_serial(&zone_data.name, &zone_data.records)?;
             ensure!(
                 previous_serial < serial,
                 "source SOA serial is not older than the next collection serial"
             );
-            parsed_records
-        } else {
-            let zone_data = records.get(&id).context("missing configured zone")?;
-            dns::internal_to_scanned_records(&zone_data.name, &zone_data.records)?
-        };
-        let unsigned = dns::render_with_serial(&zone.name, scanned_records, serial)?;
+        }
+        let unsigned = zone_data.render_with_serial(serial);
         validate_with_bind(c, &zone.name, &unsigned)?;
         let final_zone = if zone.sign {
             sign_zone_file(c, zone, &unsigned)?
@@ -317,7 +303,7 @@ fn prepare_zone_files(
         };
         validate_with_bind(c, &zone.name, &final_zone)?;
         ensure!(
-            final_zone.len() as u64 <= util::MAX_FILE,
+            unsigned.len() as u64 <= util::MAX_FILE && final_zone.len() as u64 <= util::MAX_FILE,
             "collection zone exceeds size limit"
         );
         unsigneds.insert(id.clone(), unsigned);
@@ -331,7 +317,7 @@ fn prepare_collection(
     last_serial: u32,
     reasons: Vec<String>,
     records: Records,
-    previous_unsigneds: Option<&ZoneFiles>,
+    offline_refresh: bool,
     config_sha256: String,
 ) -> Result<CollectionPackage> {
     let serial = next_serial(last_serial, time::OffsetDateTime::now_utc().date())?;
@@ -349,7 +335,7 @@ fn prepare_collection(
         reasons,
         collected_at: util::now(),
     };
-    let (unsigneds, finals) = prepare_zone_files(c, &records, previous_unsigneds, serial)?;
+    let (unsigneds, finals) = prepare_zone_files(c, &records, offline_refresh, serial)?;
 
     Ok(CollectionPackage {
         collection,
@@ -368,12 +354,6 @@ fn serialize_collection(package: &CollectionPackage) -> Result<BTreeMap<String, 
             *zone_id == dns::sanitize_zone_id_for_filename(&zone.name)?,
             "invalid snapshot zone ID"
         );
-        let json = serde_json::to_vec_pretty(zone)?;
-        ensure!(
-            json.len() as u64 <= util::MAX_FILE,
-            "collection zone exceeds size limit"
-        );
-        files.insert(format!("{zone_id}.json"), json);
         files.insert(
             format!("{zone_id}.unsigned.zone"),
             package.unsigneds[zone_id].as_bytes().to_vec(),
@@ -416,19 +396,8 @@ fn is_refresh_due(c: &Config, package: &CollectionPackage, config_sha256: &str) 
 }
 
 /// Render a unified, git-style diff between two zone record sets.
-fn unified_record_diff(
-    zone_name: &str,
-    before: &[dns::InternalRecord],
-    after: &[dns::InternalRecord],
-) -> String {
-    let render = |records: &[dns::InternalRecord]| {
-        records
-            .iter()
-            .map(|record| format!("{record}\n"))
-            .collect::<String>()
-    };
-    let (before, after) = (render(before), render(after));
-    TextDiff::from_lines(&before, &after)
+fn unified_record_diff(zone_name: &str, before: &str, after: &str) -> String {
+    TextDiff::from_lines(before, after)
         .unified_diff()
         .context_radius(3)
         .missing_newline_hint(false)
@@ -460,7 +429,11 @@ fn fresh_collection_reasons(
             reasons.push(format!("initial publication for {id}"));
             continue;
         };
-        let diff = unified_record_diff(&new.name, &previous.records, &new.records);
+        let diff = unified_record_diff(
+            &new.name,
+            &previous.comparison_text(),
+            &new.comparison_text(),
+        );
         if !diff.is_empty() {
             reasons.push(diff);
         }
@@ -483,9 +456,7 @@ pub fn collect(c: &Config) -> Result<()> {
         .filter(|package| is_refresh_due(c, package, &config_sha256));
 
     let fetched = Source::new(&c.netbox)?.stable(c);
-    // previous_unsigneds is only present when doing an offline sign refresh
-    // In this case, it contains all unsigned files in the last signing
-    let (records, previous_unsigneds, reasons) = match fetched {
+    let (records, offline_refresh, reasons) = match fetched {
         Ok(records) => {
             let unchanged = old.as_ref().is_some_and(|package| {
                 package.config_sha256 == config_sha256 && records == package.records
@@ -503,7 +474,7 @@ pub fn collect(c: &Config) -> Result<()> {
                 &config_sha256,
                 due_refresh_candidate.is_some(),
             )?;
-            (records, None, reasons)
+            (records, false, reasons)
         }
         Err(error) => {
             let Some(package) = due_refresh_candidate else {
@@ -512,7 +483,7 @@ pub fn collect(c: &Config) -> Result<()> {
             log::warn!("NetBox collection failed during signature refresh: {error:#}");
             (
                 package.records.clone(),
-                Some(&package.unsigneds),
+                true,
                 vec!["signature refresh from previous package after NetBox failure".into()],
             )
         }
@@ -524,7 +495,7 @@ pub fn collect(c: &Config) -> Result<()> {
         current.last_serial,
         reasons,
         records,
-        previous_unsigneds,
+        offline_refresh,
         config_sha256,
     )?;
     let files = serialize_collection(&package)?;

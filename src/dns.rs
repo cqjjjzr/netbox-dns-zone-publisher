@@ -2,73 +2,67 @@ use anyhow::{Result, ensure};
 use domain::{
     base::{
         Name, Serial,
-        iana::Rtype,
+        iana::{Class, Rtype},
         name::{ToName, UncertainName},
         zonefile_fmt::{DisplayKind, ZonefileFmt},
     },
     rdata::{Soa, ZoneRecordData},
     zonefile::inplace::{Entry, ScannedRecord},
 };
-use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fmt::{self, Write},
     str::FromStr,
 };
-/// The project's flat record DTO, used for stable JSON snapshots and diffs.
-///
-/// NetBox initially supplies these fields as untrusted presentation text.
-/// After `canonicalize`, all names and `value` use domain's canonical zone-file
-/// presentation and the SOA serial is zero.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
-pub struct InternalRecord {
-    pub name: String,
-    pub ttl: u32,
-    pub rr_type: String,
-    pub value: String,
-}
-
-impl InternalRecord {
-    /// Convert a parsed source record into the flat record DTO.
-    fn from_scanned_record(record: &ScannedRecord) -> InternalRecord {
-        InternalRecord {
-            name: record
-                .owner()
-                .fmt_with_dot()
-                .to_string()
-                .to_ascii_lowercase(),
-            ttl: record.ttl().as_secs(),
-            rr_type: record.rtype().to_string(),
-            value: record
-                .data()
-                .display_zonefile(DisplayKind::Simple)
-                .to_string(),
-        }
-    }
-}
-
-impl fmt::Display for InternalRecord {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{} {} IN {} {}",
-            self.name, self.ttl, self.rr_type, self.value
-        )
-    }
-}
-
-/// A zone's sorted, deduplicated normalized records. The SOA serial is zeroed during
-/// normalization: source serials are never published, so identical records stay
-/// equal across serial bumps.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+/// Typed source records. Rendering sorts and deduplicates them; comparisons
+/// ignore SOA serials without changing the retained records.
+#[derive(Clone, Debug)]
 pub struct Zone {
     pub name: String,
-    #[serde(alias = "rows")]
-    pub records: Vec<InternalRecord>,
+    pub records: Vec<ScannedRecord>,
 }
 
-/// Normalized records per canonical zone ID.
+impl Zone {
+    pub fn new(name: &str, records: Vec<ScannedRecord>) -> Result<Self> {
+        let name = canonicalize_name(name)?;
+        validate_source_policy(&name.parse()?, &records)?;
+        Ok(Self { name, records })
+    }
+
+    pub fn comparison_text(&self) -> String {
+        self.render_with_serial(0)
+    }
+
+    pub fn render_with_serial(&self, serial: u32) -> String {
+        let lines: BTreeSet<_> = self
+            .records
+            .iter()
+            .map(|record| {
+                let mut record = record.clone();
+                set_soa_serial(&mut record, serial);
+                record_line(&record)
+            })
+            .collect();
+        let mut output = format!("$ORIGIN {}\n", self.name);
+        for line in lines {
+            output.push_str(&line);
+            output.push('\n');
+        }
+        output
+    }
+}
+
+// domain::Record equality ignores TTL; the comparison view includes it.
+impl PartialEq for Zone {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name && self.comparison_text() == other.comparison_text()
+    }
+}
+
+impl Eq for Zone {}
+
+/// Typed zones per canonical zone ID.
 pub type Records = BTreeMap<String, Zone>;
+
 pub fn canonicalize_name(input: &str) -> Result<String> {
     ensure!(
         !input.is_empty() && !input.chars().any(char::is_whitespace),
@@ -141,58 +135,52 @@ fn parse_with_origin(zone_name: &str, text: &str) -> Result<Vec<ScannedRecord>> 
     Ok(records)
 }
 
-/// Convert InternalRecord (used for persistence and pulled from NetBox)
-/// to domain crate ScannedRecord
-pub fn internal_to_scanned_records(
+/// Parse one untrusted API record, resolving relative names against the zone.
+pub fn parse_record(
     zone_name: &str,
-    records: &[InternalRecord],
-) -> Result<Vec<ScannedRecord>> {
+    name: &str,
+    ttl: u32,
+    rr_type: &str,
+    value: &str,
+) -> Result<ScannedRecord> {
     let zone_name = canonicalize_name(zone_name)?;
     let origin: CanonicalName = zone_name.parse()?;
-    let mut text = String::new();
-    let mut expected = Vec::with_capacity(records.len());
-
-    for record in records {
-        ensure!(
-            !record.name.is_empty() && !record.name.contains(['\n', '\r']),
-            "empty or multiline record name rejected"
-        );
-        ensure!(
-            !record.rr_type.chars().any(char::is_whitespace),
-            "whitespace in record type rejected"
-        );
-        let rrtype = Rtype::from_str(&record.rr_type)?;
-        ensure!(
-            !matches!(rrtype, Rtype::AXFR | Rtype::IXFR | Rtype::ANY | Rtype::OPT),
-            "unsupported record type {}",
-            record.rr_type
-        );
-        let owner = if record.name == "@" {
-            origin.clone()
-        } else {
-            let owner: UncertainName<Vec<u8>> = record.name.parse()?;
-            owner.chain(origin.clone())?.to_canonical_name()
-        };
-        expected.push((owner, rrtype, record.ttl));
-        writeln!(text, "{record}").expect("writing to a String cannot fail");
-    }
-
-    // ZoneRecordData has no generic FromStr implementation: RDATA parsing needs
-    // the zone-file scanner for tokenization and origin-relative names.
-    let records = parse_with_origin(&zone_name, &text)?;
     ensure!(
-        records.len() == expected.len(),
-        "internal records must convert one-to-one"
+        !name.is_empty() && !name.contains(['\n', '\r']),
+        "empty or multiline record name rejected"
     );
-    for (record, (owner, rrtype, ttl)) in records.iter().zip(expected) {
-        ensure!(
-            canonical_name(record.owner()) == owner
-                && record.rtype() == rrtype
-                && record.ttl().as_secs() == ttl,
-            "record owner/type/TTL changed during parsing"
-        );
-    }
-    Ok(records)
+    ensure!(
+        !rr_type.chars().any(char::is_whitespace),
+        "whitespace in record type rejected"
+    );
+    let rrtype = Rtype::from_str(rr_type)?;
+    ensure!(
+        !matches!(rrtype, Rtype::AXFR | Rtype::IXFR | Rtype::ANY | Rtype::OPT),
+        "unsupported record type {rr_type}"
+    );
+    let owner = if name == "@" {
+        origin.clone()
+    } else {
+        let owner: UncertainName<Vec<u8>> = name.parse()?;
+        owner.chain(origin)?.to_canonical_name()
+    };
+
+    // RDATA scanning handles tokenization, binary escapes and relative names.
+    let text = format!("{name} {ttl} IN {rr_type} {value}\n");
+    let mut records = parse_with_origin(&zone_name, &text)?;
+    ensure!(
+        records.len() == 1,
+        "source record must parse as exactly one record"
+    );
+    let record = records.pop().unwrap();
+    ensure!(
+        canonical_name(record.owner()) == owner
+            && record.rtype() == rrtype
+            && record.ttl().as_secs() == ttl
+            && record.class() == Class::IN,
+        "record owner/type/TTL/class changed during parsing"
+    );
+    Ok(record)
 }
 
 type CanonicalName = Name<Vec<u8>>;
@@ -204,7 +192,7 @@ fn canonical_name(name: &impl ToName) -> CanonicalName {
 pub fn final_matches_unsigned(zone_name: &str, unsigned: &str, final_zone: &str) -> Result<bool> {
     let unsigned = parse(zone_name, unsigned)?
         .iter()
-        .map(InternalRecord::from_scanned_record)
+        .map(record_line)
         .collect::<BTreeSet<_>>();
     let final_zone = parse(zone_name, final_zone)?
         .iter()
@@ -214,7 +202,7 @@ pub fn final_matches_unsigned(zone_name: &str, unsigned: &str, final_zone: &str)
                 Rtype::DNSKEY | Rtype::RRSIG | Rtype::NSEC | Rtype::NSEC3 | Rtype::NSEC3PARAM
             )
         })
-        .map(InternalRecord::from_scanned_record)
+        .map(record_line)
         .collect::<BTreeSet<_>>();
     Ok(unsigned == final_zone)
 }
@@ -286,67 +274,29 @@ fn validate_source_policy(origin: &CanonicalName, records: &[ScannedRecord]) -> 
     Ok(())
 }
 
-/// Canonicalize a set of InternalRecord into a Zone
-pub fn canonicalize(zone_name: &str, records: Vec<InternalRecord>) -> Result<Zone> {
-    let zone_name = canonicalize_name(zone_name)?;
-    let origin: CanonicalName = zone_name.parse()?;
-
-    // Canonicalize with a trip to domain crate ScannedRecord
-    let scanned_records = internal_to_scanned_records(&zone_name, &records)?;
-    validate_source_policy(&origin, &scanned_records)?;
-
-    // Convert back and generate zone
-    let mut normalized_records = Vec::with_capacity(scanned_records.len());
-    for mut record in scanned_records {
-        if let ZoneRecordData::Soa(soa) = record.data_mut() {
-            // Source serials are ignored: the publisher owns serial allocation.
-            *soa = Soa::new(
-                soa.mname().clone(),
-                soa.rname().clone(),
-                Serial::from(0),
-                soa.refresh(),
-                soa.retry(),
-                soa.expire(),
-                soa.minimum(),
-            );
-        }
-        let normalized = InternalRecord::from_scanned_record(&record);
-        normalized_records.push(normalized);
-    }
-    Ok(Zone {
-        name: zone_name,
-        records: normalized_records
-            .into_iter()
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect(),
-    })
+fn record_line(record: &ScannedRecord) -> String {
+    format!(
+        "{} {} {} {} {}",
+        canonical_name(record.owner()).fmt_with_dot(),
+        record.ttl().as_secs(),
+        record.class(),
+        record.rtype(),
+        record.data().display_zonefile(DisplayKind::Simple),
+    )
 }
 
-/// Set the published SOA serial and render typed records once.
-pub fn render_with_serial(
-    zone_name: &str,
-    records: Vec<ScannedRecord>,
-    serial: u32,
-) -> Result<String> {
-    let zone_name = canonicalize_name(zone_name)?;
-    let mut output = format!("$ORIGIN {zone_name}\n");
-    for mut record in records {
-        if let ZoneRecordData::Soa(soa) = record.data_mut() {
-            *soa = Soa::new(
-                soa.mname().clone(),
-                soa.rname().clone(),
-                Serial::from(serial),
-                soa.refresh(),
-                soa.retry(),
-                soa.expire(),
-                soa.minimum(),
-            );
-        }
-        output.push_str(&record.display_zonefile(DisplayKind::Simple).to_string());
-        output.push('\n');
+fn set_soa_serial(record: &mut ScannedRecord, serial: u32) {
+    if let ZoneRecordData::Soa(soa) = record.data_mut() {
+        *soa = Soa::new(
+            soa.mname().clone(),
+            soa.rname().clone(),
+            Serial::from(serial),
+            soa.refresh(),
+            soa.retry(),
+            soa.expire(),
+            soa.minimum(),
+        );
     }
-    Ok(output)
 }
 
 /// Locate the SOA record and get the serial
