@@ -1,0 +1,46 @@
+.TH NETBOX-DNS-ZONE-PUBLISHER 1 "September 2026" "0.1.0"
+.SH NAME
+netbox-dns-zone-publisher \- collect and publish NetBox DNS snapshots
+.SH SYNOPSIS
+.B netbox-dns-zone-publisher
+.BI --config " FILE"
+.B collect|publish
+.SH DESCRIPTION
+Collects DNS records from NetBox DNS, checks and optionally signs zone files,
+and publishes verified snapshots to local directories or remote hosts over SSH.
+.SH COMMANDS
+.TP
+.B collect
+Read NetBox DNS, normalize and validate records, optionally sign zones.
+.TP
+.B publish
+Deploy the selected snapshot. This does not contact NetBox or sign zones.
+.SH OPTIONS
+.TP
+.BI --config " FILE"
+Read configuration from the specified TOML file. Required for both commands.
+.TP
+.B --help
+Show command usage.
+.TP
+.B --version
+Show program version.
+.SH FILES
+.TP
+.I /etc/netbox-dns-zone-publisher/publisher.toml
+Configuration for netbox-dns-zone-publisher.
+.TP
+.I /var/lib/netbox-dns-zone-publisher
+Default state directory used by the example configuration.
+.SH EXIT STATUS
+Zero on success; nonzero on failure.
+.SH ENVIRONMENT
+.TP
+.B RUST_LOG
+Configure log filtering (default: info).
+.SH SEE ALSO
+.BR named-checkzone (1),
+.BR dnssec-signzone (1),
+.BR ssh (1)
+.PP
+See /usr/share/doc/netbox-dns-zone-publisher/README.Debian for setup instructions.

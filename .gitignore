@@ -3,3 +3,12 @@
 __pycache__/
 .idea/
 /.vscode/
+
+/debian/.debhelper/
+/debian/cargo-target/
+/debian/netbox-dns-zone-publisher/
+/debian/netbox-dns-zone-publisher-dbgsym/
+/debian/debhelper-build-stamp
+/debian/files
+/debian/*.substvars
+/debian/*.debhelper

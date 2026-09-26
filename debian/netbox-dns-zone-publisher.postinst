@@ -1,0 +1,14 @@
+#!/bin/sh
+set -e
+if [ "$1" = configure ]; then
+    if ! getent group dns-zone-publisher >/dev/null; then
+        addgroup --system dns-zone-publisher
+    fi
+    if ! getent passwd dns-zone-publisher >/dev/null; then
+        adduser --system --ingroup dns-zone-publisher --home /var/lib/netbox-dns-zone-publisher \
+            --no-create-home --disabled-login dns-zone-publisher
+    fi
+    install -d -m 0750 -o dns-zone-publisher -g dns-zone-publisher /var/lib/netbox-dns-zone-publisher
+    install -d -m 0750 -o root -g dns-zone-publisher /etc/netbox-dns-zone-publisher
+fi
+#DEBHELPER#

@@ -1,0 +1,20 @@
+Source: netbox-dns-zone-publisher
+Section: net
+Priority: optional
+Maintainer: chariri <w@chariri.moe>
+Build-Depends: debhelper-compat (= 13), cargo (>= 1.89), rustc (>= 1.89),
+ pkg-config, clang, cmake, python3, bind9-utils
+Standards-Version: 4.7.2
+Rules-Requires-Root: no
+Homepage: https://github.com/cqjjjzr/netbox-dns-zone-publisher
+Vcs-Git: https://github.com/cqjjjzr/netbox-dns-zone-publisher.git
+Vcs-Browser: https://github.com/cqjjjzr/netbox-dns-zone-publisher
+
+Package: netbox-dns-zone-publisher
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}, bind9-utils, openssh-client,
+ ca-certificates, adduser
+Description: publish NetBox DNS snapshots to local and remote DNS servers
+ Collect DNS records from NetBox DNS, retain normalized snapshots, optionally
+ sign zones with DNSSEC, and deploy verified zone files locally or over SSH.
+ Includes a systemd timer for periodic collection and publication.

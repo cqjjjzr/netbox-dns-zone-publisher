@@ -17,7 +17,7 @@ On a Debian publisher host, install the runtime tools:
 sudo apt install bind9-utils openssh-client coreutils
 ```
 
-Create a `dns-zone-publisher` account and a `coredns` group for the supplied service unit. Give the publisher write access to its state directory and local zone directory. For remote targets, create a dedicated publication account, such as `dns-publish`, and install an SSH server with SFTP support and GNU coreutils. The publisher runs `sh` commands on both local and remote targets.
+Create a `dns-zone-publisher` system account and group for the supplied service unit, with home directory `/var/lib/netbox-dns-zone-publisher`. Give the publisher write access to its state directory and local zone directory. For remote targets, create a dedicated publication account, such as `dns-publish`, and install an SSH server with SFTP support and GNU coreutils. The publisher runs `sh` commands on both local and remote targets.
 
 Use mode 0750 for zone directories and ownership that lets the publication account write and CoreDNS read. The publisher installs zone files with mode 0644 and writes package files with mode 0600. Keep executables, Corefiles and deployment configuration under administrator control.
 
@@ -48,7 +48,7 @@ Run `collect` after changing configuration, including target settings. Publicati
 
 ## Schedule and monitor
 
-Install the supplied [service](../packaging/netbox-dns-zone-publisher.service) and [timer](../packaging/netbox-dns-zone-publisher.timer) under `/etc/systemd/system/`. Adapt the service account, writable paths and timeout to your deployment, then enable the timer:
+Install the supplied [service](../packaging/netbox-dns-zone-publisher.service) and [timer](../packaging/netbox-dns-zone-publisher.timer) under `/etc/systemd/system/`. For a manual installation under `/usr/local/bin`, change both executable paths in the service's `ExecStart` from `/usr/bin/netbox-dns-zone-publisher` to `/usr/local/bin/netbox-dns-zone-publisher`. Add local target directories (for example, `/var/lib/coredns/zones`) to `ReadWritePaths`, and adjust the service account and timeout as needed. Then enable the timer:
 
 ```sh
 sudo systemctl daemon-reload

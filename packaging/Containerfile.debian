@@ -1,0 +1,9 @@
+FROM docker.io/library/debian:13-slim
+RUN echo 'deb http://deb.debian.org/debian trixie-backports main' > /etc/apt/sources.list.d/backports.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+        build-essential debhelper pkg-config clang cmake python3 bind9-utils \
+        ca-certificates lintian \
+    && apt-get install -y --no-install-recommends -t trixie-backports cargo rustc \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /build/source

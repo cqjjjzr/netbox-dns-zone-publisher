@@ -1,0 +1,5 @@
+netbox-dns-zone-publisher (0.1.0-1) unstable; urgency=medium
+
+  * Initial upstream Debian packaging.
+
+ -- chariri <w@chariri.moe>  Sun, 27 Sep 2026 03:00:00 +0900

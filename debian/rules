@@ -1,0 +1,30 @@
+#!/usr/bin/make -f
+
+export CARGO_TARGET_DIR = $(CURDIR)/debian/cargo-target
+export CARGO_PROFILE_RELEASE_STRIP = false
+export CARGO_PROFILE_RELEASE_DEBUG = 1
+export DEB_BUILD_MAINT_OPTIONS = hardening=+all
+
+%:
+	dh $@
+
+override_dh_auto_configure:
+
+override_dh_auto_build:
+	cargo build --release --frozen --bin netbox-dns-zone-publisher
+
+override_dh_auto_test:
+ifeq (,$(filter nocheck,$(DEB_BUILD_OPTIONS)))
+	cargo test --release --frozen --all-targets
+	cargo test --release --frozen --test bind -- --ignored
+endif
+
+override_dh_auto_install:
+	install -D -m 0755 debian/cargo-target/release/netbox-dns-zone-publisher debian/netbox-dns-zone-publisher/usr/bin/netbox-dns-zone-publisher
+	python3 debian/install-crate-licenses.py debian/netbox-dns-zone-publisher/usr/share/doc/netbox-dns-zone-publisher/crate-licenses
+
+override_dh_installsystemd:
+	dh_installsystemd --no-enable --no-start
+
+override_dh_auto_clean:
+	rm -rf debian/cargo-target

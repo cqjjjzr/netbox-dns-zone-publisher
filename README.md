@@ -36,3 +36,30 @@ Commands log to stderr, with journald priority prefixes when `JOURNAL_STREAM` is
 The operation has 2 stages, collect (NetBox → zone file) and publish (zone file → DNS server). The example [systemd timer](packaging/netbox-dns-zone-publisher.timer) schedules both stages.
 
 See [operations and recovery](docs/operations.md).
+
+## Build Debian package
+
+### On Debian
+
+Prerequisites: Debian 13 with `trixie-backports` enabled; Rust/Cargo ≥ 1.89.
+
+```sh
+sudo apt update
+sudo apt install build-essential debhelper pkg-config clang cmake python3 bind9-utils
+sudo apt install -t trixie-backports cargo rustc
+cargo fetch --locked
+dpkg-buildpackage -us -uc -b
+```
+
+### On other hosts
+
+Prerequisites: Docker or Podman running Linux containers; network access.
+Run either command from the repository root; packages go to `target/debian/`.
+
+```sh
+# Podman
+./packaging/build-deb.sh
+
+# Docker
+CONTAINER_ENGINE=docker ./packaging/build-deb.sh
+```

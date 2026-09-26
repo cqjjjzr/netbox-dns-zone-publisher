@@ -1,5 +1,5 @@
 [Unit]
-Description=Reconcile CoreDNS publication
+Description=Collect and publish NetBox DNS snapshots
 
 [Timer]
 # 60s after boot, then run each 60s

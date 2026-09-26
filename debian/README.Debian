@@ -1,0 +1,29 @@
+Debian setup
+============
+
+1. Install and edit the configuration:
+
+     sudo install -o root -g dns-zone-publisher -m 0640 \
+       /usr/share/doc/netbox-dns-zone-publisher/examples/publisher.toml \
+       /etc/netbox-dns-zone-publisher/publisher.toml
+     sudoedit /etc/netbox-dns-zone-publisher/publisher.toml
+
+2. Store tokens and signing keys under /etc/netbox-dns-zone-publisher.
+   Use root:dns-zone-publisher ownership, mode 0750 for directories and 0640
+   for secrets. For SSH targets, provision an identity and known_hosts under
+   /var/lib/netbox-dns-zone-publisher/.ssh for the dns-zone-publisher account.
+
+3. Create local target directories. Give dns-zone-publisher write access and
+   the DNS server read access. Add each target to the service's writable paths:
+
+     sudo systemctl edit netbox-dns-zone-publisher.service
+
+     [Service]
+     ReadWritePaths=/var/lib/coredns/zones
+
+4. Check that the initial UTC YYYYMMDD01 serial exceeds the deployed SOA serial.
+   Run once, inspect the logs, then enable the timer:
+
+     sudo systemctl start netbox-dns-zone-publisher.service
+     sudo journalctl -u netbox-dns-zone-publisher.service
+     sudo systemctl enable --now netbox-dns-zone-publisher.timer

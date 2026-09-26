@@ -1,7 +1,6 @@
-# This unit file uses CoreDNS as an example. Adopt to your own DNS server deployment before use!
-
 [Unit]
-Description=Collect and publish NetBox DNS snapshots to CoreDNS
+Description=Collect and publish NetBox DNS snapshots
+ConditionPathExists=/etc/netbox-dns-zone-publisher/publisher.toml
 After=network-online.target
 Wants=network-online.target
 
@@ -13,8 +12,8 @@ SyslogIdentifier=netbox-dns-zone-publisher
 SyslogLevel=info
 SyslogLevelPrefix=yes
 User=dns-zone-publisher
-Group=coredns
-ExecStart=/bin/sh -c '/usr/local/bin/netbox-dns-zone-publisher --config /etc/netbox-dns-zone-publisher/publisher.toml collect; collect_rc=$$?; /usr/local/bin/netbox-dns-zone-publisher --config /etc/netbox-dns-zone-publisher/publisher.toml publish; publish_rc=$$?; if [ "$$publish_rc" -ne 0 ]; then exit "$$publish_rc"; fi; exit "$$collect_rc"'
+Group=dns-zone-publisher
+ExecStart=/bin/sh -c '/usr/bin/netbox-dns-zone-publisher --config /etc/netbox-dns-zone-publisher/publisher.toml collect; collect_rc=$$?; /usr/bin/netbox-dns-zone-publisher --config /etc/netbox-dns-zone-publisher/publisher.toml publish; publish_rc=$$?; if [ "$$publish_rc" -ne 0 ]; then exit "$$publish_rc"; fi; exit "$$collect_rc"'
 
 # Permissions
 StateDirectory=netbox-dns-zone-publisher
@@ -26,5 +25,5 @@ PrivateTmp=yes
 PrivateDevices=yes
 ProtectSystem=strict
 ProtectHome=yes
-ReadWritePaths=/var/lib/netbox-dns-zone-publisher /var/lib/coredns/zones
+ReadWritePaths=/var/lib/netbox-dns-zone-publisher
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6

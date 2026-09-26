@@ -1,0 +1,11 @@
+#!/bin/sh
+set -eu
+netbox-dns-zone-publisher --version
+netbox-dns-zone-publisher --help
+getent passwd dns-zone-publisher
+getent group dns-zone-publisher
+test -r /usr/share/doc/netbox-dns-zone-publisher/examples/publisher.toml
+test -d /usr/share/doc/netbox-dns-zone-publisher/crate-licenses
+runuser -u dns-zone-publisher -- test -w /var/lib/netbox-dns-zone-publisher
+systemd-analyze verify /usr/lib/systemd/system/netbox-dns-zone-publisher.service \
+    /usr/lib/systemd/system/netbox-dns-zone-publisher.timer
