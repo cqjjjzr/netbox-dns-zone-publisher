@@ -2,6 +2,7 @@ mod support;
 
 use netbox_dns_zone_publisher::netbox::Source;
 use serde_json::{Value, json};
+use std::{io::Read, net::TcpListener, time::Duration};
 use support::*;
 
 fn collect_pages(pages: Vec<Value>) -> anyhow::Result<netbox_dns_zone_publisher::dns::Records> {
@@ -16,6 +17,37 @@ fn scoped_pages(records: Value) -> Vec<Value> {
         page(vec![zone(1, "example.com")]),
         records,
     ]
+}
+
+#[test]
+fn https_collection_sends_a_tls_client_hello() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let url = format!("https://{}/", listener.local_addr().unwrap())
+        .parse()
+        .unwrap();
+    let mut fixture = Sandbox::new(url, &["example.com"]);
+    fixture.config.netbox.timeout_secs = 1;
+
+    // Leave the handshake unanswered. The request times out, but its queued
+    // ClientHello proves HTTPS reached TLS rather than rejecting the scheme
+    // or sending the API token over plaintext HTTP. No certificate fixture or
+    // external server is needed to exercise the production client setup.
+    let result = Source::new(&fixture.config.netbox)
+        .unwrap()
+        .collect(&fixture.config);
+    assert!(result.is_err());
+    let (mut stream, _) = listener
+        .accept()
+        .unwrap_or_else(|error| panic!("HTTPS made no connection: {error}; {result:?}"));
+    stream
+        .set_read_timeout(Some(Duration::from_secs(1)))
+        .unwrap();
+    let mut header = [0; 6];
+    stream.read_exact(&mut header).unwrap();
+    assert_eq!(header[0], 22, "expected a TLS handshake record");
+    assert_eq!(header[1], 3, "expected TLS record version 3.x");
+    assert_eq!(header[5], 1, "expected a ClientHello handshake");
 }
 
 #[test]

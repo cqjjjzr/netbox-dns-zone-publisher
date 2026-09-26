@@ -41,15 +41,17 @@ Source checks reject out-of-zone owners, inconsistent TTLs within an RRset, gene
 
 Zone filenames derive from canonical DNS names. For example, `Example.COM.` becomes `example.com.zone`. The filename encoder escapes unsafe characters and Windows device names and adds a hash suffix to long stems.
 
+Zone-file escaping is separate from filename encoding. Owners and `$ORIGIN` escape syntax characters without changing zone identities or filenames. Readable RDATA is reparsed and checked against the original wire bytes; if it cannot round-trip exactly, the publisher emits RFC 3597 generic RDATA. This preserves unusual DNS names while keeping ordinary records readable.
+
 ## Release contents
 
 A collection covers the configured zone set with one shared serial. For each zone, it contains:
 
-| File | Purpose |
-| --- | --- |
-| `<zone>.unsigned.zone` | Authoritative snapshot with the release serial; source for comparisons, record diffs and offline refresh. |
-| `<zone>.zone` | Final bytes for deployment, including signatures for a signed zone. |
-| `collection.json` | One manifest per collection, with its ID, serial, timestamp, source URL/view, zones, reasons and configuration hash. |
+| File                   | Purpose                                                                                                              |
+|------------------------|----------------------------------------------------------------------------------------------------------------------|
+| `<zone>.unsigned.zone` | Authoritative snapshot with the release serial; source for comparisons, record diffs and offline refresh.            |
+| `<zone>.zone`          | Final bytes for deployment, including signatures for a signed zone.                                                  |
+| `collection.json`      | One manifest per collection, with its ID, serial, timestamp, source URL/view, zones, reasons and configuration hash. |
 
 The configuration hash covers the parsed configuration, including targets, paths and signer settings. TOML comments and formatting do not affect it. Changes to the contents of a token or key file do not affect it either.
 

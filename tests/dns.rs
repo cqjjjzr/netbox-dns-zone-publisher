@@ -1,8 +1,162 @@
-use domain::zonefile::inplace::ScannedRecord;
+use domain::{
+    base::{name::ToName, rdata::ComposeRecordData},
+    zonefile::inplace::ScannedRecord,
+};
 use netbox_dns_zone_publisher::dns::{self, Zone};
 
 fn record(name: &str, ttl: u32, kind: &str, value: &str) -> ScannedRecord {
     dns::parse_record("example.com", name, ttl, kind, value).unwrap()
+}
+
+fn rdata_bytes(record: &ScannedRecord) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    record.data().compose_rdata(&mut bytes).unwrap();
+    bytes
+}
+
+#[test]
+fn every_label_octet_survives_owner_and_cname_rendering() {
+    for byte in 0..=255 {
+        let owner = format!(r"a\{byte:03}b.example.com.");
+        let target = format!(r"t\{byte:03}z.example.com.");
+        let original = record(&owner, 0, "CNAME", &target);
+        let zone = Zone::new("example.com", vec![original.clone()]).unwrap();
+        let rendered = zone.render_with_serial(1);
+        let parsed = dns::parse("example.com", &rendered)
+            .unwrap_or_else(|error| panic!("byte {byte}: {error}; {rendered}"));
+        assert_eq!(parsed.len(), 1, "byte {byte}: {rendered}");
+        let actual = &parsed[0];
+        assert_eq!(
+            actual.owner().to_canonical_name::<Vec<u8>>(),
+            original.owner().to_canonical_name::<Vec<u8>>()
+        );
+        assert_eq!(actual.ttl(), original.ttl());
+        assert_eq!(actual.class(), original.class());
+        assert_eq!(actual.rtype(), original.rtype());
+        assert_eq!(
+            rdata_bytes(actual),
+            rdata_bytes(&original),
+            "byte {byte}: {rendered}"
+        );
+    }
+}
+
+#[test]
+fn punctuation_uses_generic_rdata_only_when_readable_output_loses_bytes() {
+    let original = record("alias", 300, "CNAME", r"a\;b.example.com.");
+    let zone = Zone::new("example.com", vec![original]).unwrap();
+    let rendered = zone.render_with_serial(1);
+    assert!(rendered.contains(r"CNAME \# 17 "));
+    let reloaded = Zone::new("example.com", dns::parse("example.com", &rendered).unwrap()).unwrap();
+    assert_eq!(zone.comparison_text(), reloaded.comparison_text());
+    assert!(
+        !dns::final_matches_unsigned(
+            "example.com",
+            &rendered,
+            "alias 300 IN CNAME a.example.com.\n"
+        )
+        .unwrap()
+    );
+
+    let normal = Zone::new(
+        "example.com",
+        vec![
+            record("www", 300, "A", "192.0.2.1"),
+            record("alias", 300, "CNAME", "MiXeD.example.com."),
+            record("text", 300, "TXT", r#""semi; (paren) quote\" slash\\""#),
+        ],
+    )
+    .unwrap();
+    let rendered = normal.render_with_serial(1);
+    assert!(!rendered.contains(r"\#"), "{rendered}");
+    let parsed = dns::parse("example.com", &rendered).unwrap();
+    for original in &normal.records {
+        let actual = parsed
+            .iter()
+            .find(|r| r.owner().name_eq(original.owner()))
+            .unwrap();
+        assert_eq!(rdata_bytes(actual), rdata_bytes(original));
+    }
+}
+
+#[test]
+fn escaping_zonefile_names_preserves_zone_identity_and_filenames() {
+    for name in [
+        r"a\;b.example.com.",
+        r"a\059b.example.com.",
+        "a;b.example.com.",
+    ] {
+        assert_eq!(dns::canonicalize_name(name).unwrap(), "a;b.example.com.");
+        assert_eq!(
+            dns::sanitize_zone_id_for_filename(name).unwrap(),
+            "a%3bb.example.com"
+        );
+        let zone = Zone::new(
+            name,
+            vec![dns::parse_record(name, "@", 300, "A", "192.0.2.1").unwrap()],
+        )
+        .unwrap();
+        let rendered = zone.render_with_serial(1);
+        assert!(
+            rendered.starts_with("$ORIGIN a\\059b.example.com.\n"),
+            "{rendered}"
+        );
+        let parsed = dns::parse(name, &rendered).unwrap();
+        assert!(parsed[0].owner().name_eq(zone.records[0].owner()));
+        assert_eq!(zone.name, "a;b.example.com.");
+        assert_eq!(
+            dns::sanitize_zone_id_for_filename(&zone.name).unwrap(),
+            "a%3bb.example.com"
+        );
+    }
+}
+
+#[test]
+fn escaped_soa_and_ns_names_retain_serial_and_delegation_behavior_after_reload() {
+    let original = Zone::new(
+        "example.com",
+        vec![
+            record(
+                "@",
+                300,
+                "SOA",
+                r#"ns\;x.example.com. host\"master.example.com. 1 3600 600 86400 300"#,
+            ),
+            record("child", 300, "NS", r"ns\(x.child.example.com."),
+        ],
+    )
+    .unwrap();
+    let rendered = original.render_with_serial(2);
+    assert!(!rendered.contains(r"\#"), "{rendered}");
+    let mut reloaded =
+        Zone::new("example.com", dns::parse("example.com", &rendered).unwrap()).unwrap();
+    assert_eq!(
+        dns::soa_serial("example.com", &reloaded.records).unwrap(),
+        2
+    );
+    assert_eq!(original.comparison_text(), reloaded.comparison_text());
+    reloaded
+        .records
+        .push(record("www.child", 300, "TXT", r#""occluded""#));
+    assert!(
+        Zone::new("example.com", reloaded.records)
+            .unwrap_err()
+            .to_string()
+            .contains("non-glue data")
+    );
+}
+
+#[test]
+fn leading_name_syntax_and_root_rdata_survive_rendering() {
+    for owner in [r"\036INCLUDE", r"\064"] {
+        let original = record(owner, 300, "CNAME", ".");
+        let zone = Zone::new("example.com", vec![original.clone()]).unwrap();
+        let rendered = zone.render_with_serial(1);
+        let parsed = dns::parse("example.com", &rendered).unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert!(parsed[0].owner().name_eq(original.owner()));
+        assert_eq!(rdata_bytes(&parsed[0]), rdata_bytes(&original));
+    }
 }
 
 #[test]

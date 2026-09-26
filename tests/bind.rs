@@ -1,6 +1,7 @@
 mod support;
 
-use netbox_dns_zone_publisher::{config::Signer, publisher, util};
+use domain::base::name::ToName;
+use netbox_dns_zone_publisher::{config::Signer, dns, publisher, util};
 use std::{fs, time::Duration};
 use support::*;
 
@@ -31,16 +32,59 @@ fn real_bind_signs_verifies_publishes_and_refreshes_during_a_source_outage() {
     fixture.config.zones[0].keys = vec![fixture.root.path().join(key.trim())];
     fixture.config.validate().unwrap();
 
+    let unusual = [
+        ("alias.example.com.", "CNAME", r"a\;b.example.com."),
+        (r"o\;wner.example.com.", "TXT", r#""semi; (paren)""#),
+    ];
+    api.state
+        .lock()
+        .unwrap()
+        .records
+        .get_mut("example.com")
+        .unwrap()
+        .extend(
+            unusual
+                .iter()
+                .enumerate()
+                .map(|(i, (owner, kind, value))| record(i as u64 + 10, 1, owner, kind, value)),
+        );
     publisher::collect(&fixture.config).unwrap();
     let first_serial = fixture.manifest()["serial"].as_u64().unwrap();
     let signed = fs::read_to_string(fixture.package().join("example.com.zone")).unwrap();
     assert!(signed.contains("RRSIG"));
     assert!(signed.contains("DNSKEY"));
-    publisher::publish(&fixture.config).unwrap();
+    let unsigned = fs::read_to_string(fixture.package().join("example.com.unsigned.zone")).unwrap();
+    assert!(
+        dns::final_matches_unsigned("example.com", &unsigned, &signed).unwrap(),
+        "unsigned:\n{unsigned}\nsigned:\n{signed}"
+    );
+    let pointer = fixture.pointer();
+    publisher::collect(&fixture.config).unwrap();
+    assert_eq!(
+        fixture.pointer(),
+        pointer,
+        "generic snapshots must remain a no-op"
+    );
+    let published = fixture.cli("publish");
+    assert!(published.status.success());
+    assert!(
+        published.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&published.stderr)
+    );
+    let records = dns::parse("example.com", &signed).unwrap();
+    for (owner, kind, value) in unusual {
+        let expected = dns::parse_record("example.com", owner, 300, kind, value).unwrap();
+        assert!(
+            records
+                .iter()
+                .any(|r| { r.owner().name_eq(expected.owner()) && r.data() == expected.data() }),
+            "signed output changed {owner} {kind} {value}"
+        );
+    }
 
     // Keep authoritative data and the DNSKEY intact, but remove all signatures.
     // This reaches the real verifier after the record comparison and zone checker.
-    let unsigned = fs::read_to_string(fixture.package().join("example.com.unsigned.zone")).unwrap();
     let public_key =
         fs::read_to_string(format!("{}.key", fixture.config.zones[0].keys[0].display())).unwrap();
     fs::write(

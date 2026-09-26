@@ -1,9 +1,10 @@
 use anyhow::{Result, ensure};
 use domain::{
     base::{
-        Name, Serial,
+        Name, Serial, UnknownRecordData,
         iana::{Class, Rtype},
         name::{ToName, UncertainName},
+        rdata::ComposeRecordData,
         zonefile_fmt::{DisplayKind, ZonefileFmt},
     },
     rdata::{Soa, ZoneRecordData},
@@ -42,7 +43,8 @@ impl Zone {
                 record_line(&record)
             })
             .collect();
-        let mut output = format!("$ORIGIN {}\n", self.name);
+        let origin: CanonicalName = self.name.parse().expect("zone has a validated name");
+        let mut output = format!("$ORIGIN {}\n", zonefile_name(&origin));
         for line in lines {
             output.push_str(&line);
             output.push('\n');
@@ -122,7 +124,8 @@ pub fn parse(zone_name: &str, text: &str) -> Result<Vec<ScannedRecord>> {
 }
 
 fn parse_with_origin(zone_name: &str, text: &str) -> Result<Vec<ScannedRecord>> {
-    let input = format!("$ORIGIN {zone_name}\n{text}");
+    let origin: CanonicalName = zone_name.parse()?;
+    let input = format!("$ORIGIN {}\n{text}", zonefile_name(&origin));
     let mut file = domain::zonefile::inplace::Zonefile::load(&mut input.as_bytes())?;
     let mut records = Vec::new();
     while let Some(entry) = file.next_entry()? {
@@ -274,15 +277,85 @@ fn validate_source_policy(origin: &CanonicalName, records: &[ScannedRecord]) -> 
     Ok(())
 }
 
+/// Escape names only at the zone-file boundary. Canonical identities and
+/// filename encoding deliberately retain their existing representation.
+fn zonefile_name(name: &impl ToName) -> String {
+    let mut output = String::new();
+    for label in name.iter_labels() {
+        if label.as_slice().is_empty() {
+            if output.is_empty() {
+                output.push('.');
+            }
+            break;
+        }
+        for byte in label.iter() {
+            match byte {
+                b' ' | b'.' | b'\\' => {
+                    output.push('\\');
+                    output.push(byte as char);
+                }
+                b';' | b'(' | b')' | b'"' | b'@' | b'$' => {
+                    output.push_str(&format!("\\{byte:03}"));
+                }
+                0x21..=0x7e => output.push(byte as char),
+                _ => output.push_str(&format!("\\{byte:03}")),
+            }
+        }
+        output.push('.');
+    }
+    output
+}
+
+fn rdata_bytes(record: &ScannedRecord) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    // A Vec composer cannot fail or emit name-compression pointers.
+    record.data().compose_rdata(&mut bytes).unwrap();
+    bytes
+}
+
 fn record_line(record: &ScannedRecord) -> String {
-    format!(
-        "{} {} {} {} {}",
-        canonical_name(record.owner()).fmt_with_dot(),
+    let header = format!(
+        "{} {} {} {}",
+        zonefile_name(&canonical_name(record.owner())),
         record.ttl().as_secs(),
         record.class(),
         record.rtype(),
-        record.data().display_zonefile(DisplayKind::Simple),
-    )
+    );
+    // The scanner retains RFC 3597 input as Unknown, even for known types.
+    // Keep SOA/NS readable so snapshot reloads retain serial/delegation semantics.
+    let rdata = match record.data() {
+        ZoneRecordData::Soa(soa) => format!(
+            "{} {} {} {} {} {} {}",
+            zonefile_name(soa.mname()),
+            zonefile_name(soa.rname()),
+            soa.serial().into_int(),
+            soa.refresh().as_secs(),
+            soa.retry().as_secs(),
+            soa.expire().as_secs(),
+            soa.minimum().as_secs(),
+        ),
+        ZoneRecordData::Ns(ns) => zonefile_name(ns.nsdname()),
+        data => data.display_zonefile(DisplayKind::Simple).to_string(),
+    };
+    let readable = format!("{header} {rdata}\n");
+    let bytes = rdata_bytes(record);
+    // Some domain formatters lose escaping in embedded names. Accept readable
+    // output only when a fresh scanner recovers the same record and RDATA bytes.
+    if let Ok(parsed) = parse_with_origin(".", &readable)
+        && let [parsed] = parsed.as_slice()
+        && parsed.owner().name_eq(record.owner())
+        && parsed.ttl() == record.ttl()
+        && parsed.class() == record.class()
+        && parsed.rtype() == record.rtype()
+        && rdata_bytes(parsed) == bytes
+    {
+        return readable.trim_end_matches('\n').to_owned();
+    }
+    // Use the same generic formatter as reloaded snapshots, keeping comparison
+    // text stable across signing and reloads (including hex spacing/case).
+    let generic = UnknownRecordData::from_octets(record.rtype(), bytes)
+        .expect("parsed RDATA fits its wire length");
+    format!("{header} {}", generic.display_zonefile(DisplayKind::Simple))
 }
 
 fn set_soa_serial(record: &mut ScannedRecord, serial: u32) {
