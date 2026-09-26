@@ -1,0 +1,37 @@
+# Replace view/zone names and paths with your deployment values.
+state_dir = "/var/lib/netbox-dns-zone-publisher"
+checker = "/usr/bin/named-checkzone"
+
+[netbox]
+view = "public"
+url = "https://netbox.example.com/"
+token_file = "/etc/netbox-dns-zone-publisher/credentials/netbox-token"
+timeout_secs = 15
+max_records = 100000
+
+[signer]
+program = "/usr/bin/dnssec-signzone"
+verifier = "/usr/bin/dnssec-verify"
+validity_secs = 1209600
+refresh_secs = 86400
+
+[[zones]]
+name = "example.com"
+sign = true
+# BIND-format CSK basename; both .key and .private must exist. Use your own generated keys.
+keys = ["/etc/netbox-dns-zone-publisher/keys/Kexample.com.+013+12345"]
+
+[[zones]]
+name = "local.example.com"
+sign = false
+
+[[targets]]
+# Targets can be local or SSH, in any order.
+name = "ns1"
+directory = "/var/lib/coredns/zones"
+
+[[targets]]
+name = "ns2"
+directory = "/var/lib/coredns/zones"
+[targets.ssh]
+host = "dns-publish@ns2.example.com"

@@ -1,0 +1,28 @@
+# Adapt names, online key basenames, transfer address and ACME backend.
+example.com:53 {
+    errors
+    file /var/lib/coredns/zones/example.com.zone example.com {
+        reload 5s
+    }
+    transfer {
+        to 192.0.2.53
+    }
+}
+
+local.example.com:53 {
+    errors
+    dnssec {
+        key file /etc/coredns/keys/Klocal.example.com.+013+12345
+    }
+    file /var/lib/coredns/zones/local.example.com.zone local.example.com {
+        reload 5s
+    }
+}
+
+acme.example.com:53 {
+    errors
+    dnssec {
+        key file /etc/coredns/keys/Kacme.example.com.+013+12345
+    }
+    forward . 192.0.2.2:5354
+}

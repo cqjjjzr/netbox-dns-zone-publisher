@@ -1,0 +1,10 @@
+[Unit]
+Description=Reconcile CoreDNS publication every minute
+
+[Timer]
+OnBootSec=30s
+OnUnitInactiveSec=60s
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target
