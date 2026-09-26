@@ -18,6 +18,8 @@ refresh_secs = 86400
 [[zones]]
 name = "example.com"
 sign = true
+# Optional: NSEC3 with no salt, zero extra iterations, and no Opt-Out (default: NSEC).
+# nsec3 = true
 # BIND-format CSK basename; both .key and .private must exist. Use your own generated keys.
 keys = ["/etc/netbox-dns-zone-publisher/keys/Kexample.com.+013+12345"]
 

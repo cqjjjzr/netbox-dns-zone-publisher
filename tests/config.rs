@@ -35,11 +35,36 @@ token_file = "/tmp/token"
     assert_eq!(config.netbox.timeout_secs, 15);
     assert_eq!(config.netbox.max_records, 100_000);
     assert!(!config.zones[0].sign);
+    assert!(!config.zones[0].nsec3);
     let signer = config.signer.unwrap();
     assert_eq!(signer.program.to_str().unwrap(), "dnssec-signzone");
     assert_eq!(signer.verifier.to_str().unwrap(), "dnssec-verify");
     assert_eq!(signer.validity_secs, 1_209_600);
     assert_eq!(signer.refresh_secs, 86_400);
+}
+
+#[test]
+fn nsec3_is_per_zone_and_default_serialization_preserves_existing_config_hashes() {
+    let example = include_str!("../examples/publisher.toml");
+    let old: Config = toml::from_str(example).unwrap();
+    let explicit_default: Config =
+        toml::from_str(&example.replace("# nsec3 = true", "nsec3 = false")).unwrap();
+    let old_json = serde_json::to_value(&old).unwrap();
+    assert!(old_json["zones"][0].get("nsec3").is_none());
+    assert_eq!(
+        serde_json::to_vec(&old).unwrap(),
+        serde_json::to_vec(&explicit_default).unwrap()
+    );
+
+    let enabled: Config =
+        toml::from_str(&example.replace("# nsec3 = true", "nsec3 = true")).unwrap();
+    enabled.validate().unwrap();
+    assert!(enabled.zones[0].nsec3);
+    assert!(!enabled.zones[1].nsec3);
+    let json = serde_json::to_vec(&enabled).unwrap();
+    assert_ne!(json, serde_json::to_vec(&old).unwrap());
+    let reloaded: Config = serde_json::from_slice(&json).unwrap();
+    assert_eq!(reloaded.zones, enabled.zones);
 }
 
 #[test]
@@ -59,6 +84,7 @@ fn configuration_rejects_ambiguous_identities_and_unsafe_destinations() {
             c.zones[0].keys.push("relative".into())
         }),
         ("signed zone requires signer", |c| c.zones[0].sign = true),
+        ("NSEC3 requires sign = true", |c| c.zones[0].nsec3 = true),
         ("target name must not be blank", |c| {
             c.targets[0].name = " ".into()
         }),

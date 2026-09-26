@@ -1,6 +1,6 @@
 mod support;
 
-use domain::base::name::ToName;
+use domain::base::{iana::Rtype, name::ToName, rdata::ComposeRecordData};
 use netbox_dns_zone_publisher::{config::Signer, dns, publisher, util};
 use std::{fs, time::Duration};
 use support::*;
@@ -8,6 +8,36 @@ use support::*;
 #[test]
 #[ignore = "requires named-checkzone, dnssec-keygen, dnssec-signzone and dnssec-verify on PATH"]
 fn real_bind_signs_verifies_publishes_and_refreshes_during_a_source_outage() {
+    signing_lifecycle(false);
+}
+
+#[test]
+#[ignore = "requires named-checkzone, dnssec-keygen, dnssec-signzone and dnssec-verify on PATH"]
+fn real_bind_nsec3_signs_verifies_publishes_and_refreshes_during_a_source_outage() {
+    signing_lifecycle(true);
+}
+
+fn assert_denial_records(signed: &str, nsec3: bool) {
+    let records = dns::parse("example.com", signed).unwrap();
+    for (rtype, expected) in [
+        (Rtype::NSEC, !nsec3),
+        (Rtype::NSEC3, nsec3),
+        (Rtype::NSEC3PARAM, nsec3),
+    ] {
+        assert_eq!(records.iter().any(|r| r.rtype() == rtype), expected);
+    }
+    for record in records
+        .iter()
+        .filter(|r| matches!(r.rtype(), Rtype::NSEC3 | Rtype::NSEC3PARAM))
+    {
+        let mut bytes = Vec::new();
+        record.data().compose_rdata(&mut bytes).unwrap();
+        // SHA-1, no Opt-Out, zero extra iterations, empty salt.
+        assert_eq!(&bytes[..5], &[1, 0, 0, 0, 0]);
+    }
+}
+
+fn signing_lifecycle(nsec3: bool) {
     let api = Api::new(&["example.com", "example.net"]);
     let mut fixture = Sandbox::new(api.server.url.clone(), &["example.com", "example.net"]);
     let generated = util::command(
@@ -29,6 +59,7 @@ fn real_bind_signs_verifies_publishes_and_refreshes_during_a_source_outage() {
         refresh_secs: 86_400,
     });
     fixture.config.zones[0].sign = true;
+    fixture.config.zones[0].nsec3 = nsec3;
     fixture.config.zones[0].keys = vec![fixture.root.path().join(key.trim())];
     fixture.config.validate().unwrap();
 
@@ -53,6 +84,12 @@ fn real_bind_signs_verifies_publishes_and_refreshes_during_a_source_outage() {
     let signed = fs::read_to_string(fixture.package().join("example.com.zone")).unwrap();
     assert!(signed.contains("RRSIG"));
     assert!(signed.contains("DNSKEY"));
+    assert_denial_records(&signed, nsec3);
+    assert_eq!(
+        fs::read(fixture.package().join("example.net.zone")).unwrap(),
+        fs::read(fixture.package().join("example.net.unsigned.zone")).unwrap(),
+        "the other zone must remain unsigned"
+    );
     let unsigned = fs::read_to_string(fixture.package().join("example.com.unsigned.zone")).unwrap();
     assert!(
         dns::final_matches_unsigned("example.com", &unsigned, &signed).unwrap(),
@@ -117,6 +154,34 @@ fn real_bind_signs_verifies_publishes_and_refreshes_during_a_source_outage() {
     assert_ne!(
         fs::read_to_string(fixture.package().join("example.com.zone")).unwrap(),
         signed
+    );
+    assert_denial_records(
+        &fs::read_to_string(fixture.package().join("example.com.zone")).unwrap(),
+        nsec3,
+    );
+
+    // Changing only the denial mode must rebuild, even with unchanged API records.
+    api.state.lock().unwrap().unavailable = false;
+    let pointer = fixture.pointer();
+    fixture.config.zones[0].nsec3 = !nsec3;
+    publisher::collect(&fixture.config).unwrap();
+    assert_ne!(fixture.pointer(), pointer);
+    assert!(
+        fixture.manifest()["reasons"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("configuration changed"))
+    );
+    assert_denial_records(
+        &fs::read_to_string(fixture.package().join("example.com.zone")).unwrap(),
+        !nsec3,
+    );
+    let published = fixture.cli("publish");
+    assert!(published.status.success());
+    assert!(
+        published.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&published.stderr)
     );
 }
 

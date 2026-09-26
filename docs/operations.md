@@ -38,6 +38,8 @@ netbox-dns-zone-publisher --config /etc/netbox-dns-zone-publisher/publisher.toml
 
 During `collect`, the publisher reads the source twice, prepares zone files, signs configured zones and checks the results. Changed records, changed configuration or a due signature refresh create a new package. All zones in that package share one serial. Unchanged records and configuration leave the selected package in place unless a refresh is due.
 
+Signed zones use NSEC by default. Set `nsec3 = true` alongside `sign = true` in a `[[zones]]` entry to use NSEC3 with no salt, zero extra iterations, and no Opt-Out.
+
 If you really want to manually change the collected file beforer publish, you need to ensure the unsigned one matches the signed one. Still, this will be overwritten on next collection, so you have to either fix the root cause or disable the timer. 
 
 During `publish`, the publisher checks the selected package and installs accepted zone files on the configured targets. You can repeat this command to repair missing files, changed bytes or incorrect modes. It uses the stored final files without contacting NetBox or signing again.

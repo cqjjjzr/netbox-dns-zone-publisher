@@ -210,11 +210,15 @@ fn sign_zone_file(c: &Config, zone_config: &ZoneConfig, unsigned: &str) -> Resul
         "now-300",                                // five minutes back for clock skew
         "-e",                                     // signature expiry
         &format!("now+{}", signer.validity_secs), // after the configured validity
-        "-f",                                     // output file
     ]
     .into_iter()
     .map(OsString::from)
     .collect();
+    if zone_config.nsec3 {
+        // RFC 9276: no salt, no additional iterations, and no Opt-Out.
+        args.extend(["-3", "-", "-H", "0"].map(OsString::from));
+    }
+    args.push("-f".into()); // output file
     args.push(output.as_os_str().to_owned()); // signed output written here
     args.push(input.as_os_str().to_owned()); // unsigned zone to sign
     args.extend(

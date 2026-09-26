@@ -1,6 +1,6 @@
 # netbox-dns-zone-publisher
 
-A publisher for NetBox DNS and local/remote DNS servers. It reads the NetBox DNS REST API, retains historical normalized collections, optionally signs conventional NSEC zones, and installs verified zone files locally and using SCP/SSH.
+A publisher for NetBox DNS and local/remote DNS servers. It reads the NetBox DNS REST API, retains historical normalized collections, optionally signs NSEC or NSEC3 zones, and installs verified zone files locally and using SCP/SSH.
 
 The publisher runs external of NetBox or DNS server in a separate process.
 

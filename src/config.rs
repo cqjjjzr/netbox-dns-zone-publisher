@@ -42,6 +42,8 @@ pub struct ZoneConfig {
     pub name: String,
     #[serde(default)]
     pub sign: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub nsec3: bool,
     #[serde(default)]
     pub keys: Vec<PathBuf>,
 }
@@ -122,6 +124,7 @@ impl Config {
                 !z.sign || (self.signer.is_some() && !z.keys.is_empty()),
                 "signed zone requires signer and key paths"
             );
+            ensure!(!z.nsec3 || z.sign, "NSEC3 requires sign = true");
         }
         let mut targets = BTreeSet::new();
         for t in &self.targets {

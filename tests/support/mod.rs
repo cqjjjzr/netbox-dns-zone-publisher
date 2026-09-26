@@ -253,6 +253,7 @@ impl Sandbox {
                 .map(|name| ZoneConfig {
                     name: name.to_string(),
                     sign: false,
+                    nsec3: false,
                     keys: vec![],
                 })
                 .collect(),

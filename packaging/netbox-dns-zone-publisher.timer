@@ -1,8 +1,9 @@
 [Unit]
-Description=Reconcile CoreDNS publication every minute
+Description=Reconcile CoreDNS publication
 
 [Timer]
-OnBootSec=30s
+# 60s after boot, then run each 60s
+OnBootSec=60s
 OnUnitInactiveSec=60s
 AccuracySec=5s
 

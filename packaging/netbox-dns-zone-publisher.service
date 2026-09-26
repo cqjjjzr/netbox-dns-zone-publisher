@@ -1,3 +1,5 @@
+# This unit file uses CoreDNS as an example. Adopt to your own DNS server deployment before use!
+
 [Unit]
 Description=Collect and publish NetBox DNS snapshots to CoreDNS
 After=network-online.target
@@ -13,6 +15,8 @@ SyslogLevelPrefix=yes
 User=dns-zone-publisher
 Group=coredns
 ExecStart=/bin/sh -c '/usr/local/bin/netbox-dns-zone-publisher --config /etc/netbox-dns-zone-publisher/publisher.toml collect; collect_rc=$$?; /usr/local/bin/netbox-dns-zone-publisher --config /etc/netbox-dns-zone-publisher/publisher.toml publish; publish_rc=$$?; if [ "$$publish_rc" -ne 0 ]; then exit "$$publish_rc"; fi; exit "$$collect_rc"'
+
+# Permissions
 StateDirectory=netbox-dns-zone-publisher
 StateDirectoryMode=0750
 UMask=0077
