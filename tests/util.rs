@@ -58,7 +58,7 @@ fn state_lock_fences_a_second_writer_and_releases_on_drop() {
     let error = StateLock::try_lock(temp.path())
         .err()
         .expect("second writer must fail");
-    assert!(error.to_string().contains("another writer"));
+    assert!(format!("{error:#}").contains("another writer"));
     drop(first);
     StateLock::try_lock(temp.path()).unwrap();
 }

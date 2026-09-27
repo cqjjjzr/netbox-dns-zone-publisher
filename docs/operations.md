@@ -46,6 +46,13 @@ During `publish`, the publisher checks the selected package and installs accepte
 
 Run `collect` after changing configuration, including target settings. Publication refuses a package whose configuration hash differs.
 
+To diagnose API or external command failures, enable debug logging:
+
+```sh
+sudo -u dns-zone-publisher env RUST_LOG=netbox_dns_zone_publisher=debug \
+  netbox-dns-zone-publisher --config /etc/netbox-dns-zone-publisher/publisher.toml collect
+```
+
 ## Schedule and monitor
 
 Install the supplied [service](../packaging/netbox-dns-zone-publisher.service) and [timer](../packaging/netbox-dns-zone-publisher.timer) under `/etc/systemd/system/`. For a manual installation under `/usr/local/bin`, change both executable paths in the service's `ExecStart` from `/usr/bin/netbox-dns-zone-publisher` to `/usr/local/bin/netbox-dns-zone-publisher`. Add local target directories (for example, `/var/lib/coredns/zones`) to `ReadWritePaths`, and adjust the service account and timeout as needed. Then enable the timer:

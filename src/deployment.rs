@@ -18,6 +18,26 @@ fn path_arg(path: &Path) -> Result<String> {
     Ok(quote(path.to_str().context("non-UTF8 deployment path")?))
 }
 
+/// SSH takes a host argument; SCP embeds it in a [host]:path when IPv6 used.
+fn transport_host(destination: &str, scp: bool) -> String {
+    let (user, host) = destination
+        .rsplit_once('@')
+        .map_or((None, destination), |(user, host)| (Some(user), host));
+    let host = host
+        .strip_prefix('[')
+        .and_then(|host| host.strip_suffix(']'))
+        .unwrap_or(host);
+    let host = if scp && host.contains(':') {
+        format!("[{host}]")
+    } else {
+        host.to_owned()
+    };
+    match user {
+        Some(user) => format!("{user}@{host}"),
+        None => host,
+    }
+}
+
 fn cmd_ssh(
     target: &Target,
     copy: bool,
@@ -49,7 +69,11 @@ fn cmd_ssh(
 
 fn run_shell(target: &Target, script: &str) -> Result<Vec<u8>> {
     let cmd = if let Some(ssh) = &target.ssh {
-        cmd_ssh(target, false, [ssh.host.clone().into(), "sh -s".into()])?
+        cmd_ssh(
+            target,
+            false,
+            [transport_host(&ssh.host, false).into(), "sh -s".into()],
+        )?
     } else {
         duct::cmd("sh", ["-s"])
     };
@@ -96,7 +120,12 @@ fn stage_file(target: &Target, active: &Path, bytes: &[u8]) -> Result<PathBuf> {
             [
                 "--".into(),                         // stop option parsing before the source path
                 local.path().as_os_str().to_owned(), // src: fsynced local temporary file
-                format!("{}:{}", ssh.host, target_temp_path.display()).into(), // dst
+                format!(
+                    "{}:{}",
+                    transport_host(&ssh.host, true),
+                    target_temp_path.display()
+                )
+                .into(), // dst
             ],
         )?;
         util::command(&cmd, &[], Duration::from_secs(120)).map(|_| ())

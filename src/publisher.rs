@@ -59,7 +59,8 @@ fn read_current_collection(
     // Read current.json
     let current_path = c.state_dir.join("current.json");
     let current: CurrentCollection = match fs::read(&current_path) {
-        Ok(bytes) => serde_json::from_slice(&bytes).context("invalid current pointer")?,
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .with_context(|| format!("invalid current pointer {}", current_path.display()))?,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             ensure!(
                 !c.state_dir.join("collected").exists(),
@@ -67,7 +68,10 @@ fn read_current_collection(
             );
             CurrentCollection::default()
         }
-        Err(error) => return Err(error.into()),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("read current pointer {}", current_path.display()));
+        }
     };
     let Some(id) = current.collection_id else {
         return Ok((current, None));
@@ -95,8 +99,12 @@ fn read_collection(
     // Read collection.json pointed by current.json
     let directory = c.state_dir.join("collected").join(id.to_string());
     let mut package: CollectionPackage = serde_json::from_slice(
-        &fs::read(directory.join("collection.json"))
-            .context("incomplete collection: missing manifest")?,
+        &fs::read(directory.join("collection.json")).with_context(|| {
+            format!(
+                "incomplete collection: missing manifest or unreadable {}",
+                directory.join("collection.json").display()
+            )
+        })?,
     )
     .context("invalid collection manifest")?;
     ensure!(
@@ -112,9 +120,12 @@ fn read_collection(
     let mut finals = ZoneFiles::new();
     for name in &package.collection.zones {
         let zone_id = dns::sanitize_zone_id_for_filename(name)?;
-        let unsigned = util::bounded_read(fs::File::open(
-            directory.join(format!("{zone_id}.unsigned.zone")),
-        )?)?;
+        let unsigned_path = directory.join(format!("{zone_id}.unsigned.zone"));
+        let unsigned = util::bounded_read(
+            fs::File::open(&unsigned_path)
+                .with_context(|| format!("open unsigned zone {}", unsigned_path.display()))?,
+        )
+        .with_context(|| format!("read unsigned zone {}", unsigned_path.display()))?;
         let unsigned = String::from_utf8(unsigned)?;
         if load_records {
             let zone = Zone::new(name, dns::parse(name, &unsigned)?)?;
@@ -127,8 +138,12 @@ fn read_collection(
             unsigneds.insert(zone_id.clone(), unsigned).is_none(),
             "duplicate collection zone"
         );
-        let contents =
-            util::bounded_read(fs::File::open(directory.join(format!("{zone_id}.zone")))?)?;
+        let final_path = directory.join(format!("{zone_id}.zone"));
+        let contents = util::bounded_read(
+            fs::File::open(&final_path)
+                .with_context(|| format!("open final zone {}", final_path.display()))?,
+        )
+        .with_context(|| format!("read final zone {}", final_path.display()))?;
         ensure!(
             finals
                 .insert(zone_id, String::from_utf8(contents)?)
@@ -158,9 +173,15 @@ fn validate_with_bind(c: &Config, name: &str, contents: &str) -> Result<()> {
 
 fn verify_signed_zone(c: &Config, zone_config: &ZoneConfig, contents: &str) -> Result<()> {
     let signer = c.signer.as_ref().context("signer missing")?;
-    let directory = tempfile::tempdir_in(&c.state_dir)?;
+    let directory = tempfile::tempdir_in(&c.state_dir).with_context(|| {
+        format!(
+            "create signing/verification temporary directory in {}",
+            c.state_dir.display()
+        )
+    })?;
     let path = directory.path().join("signed.zone");
-    fs::write(&path, contents)?;
+    fs::write(&path, contents)
+        .with_context(|| format!("write verification input {}", path.display()))?;
     util::command(
         &duct::cmd(
             signer.verifier.as_os_str(), // default binary: dnssec-verify
@@ -180,22 +201,32 @@ fn verify_signed_zone(c: &Config, zone_config: &ZoneConfig, contents: &str) -> R
 
 fn sign_zone_file(c: &Config, zone_config: &ZoneConfig, unsigned: &str) -> Result<String> {
     let signer = c.signer.as_ref().context("signer missing")?;
-    let directory = tempfile::tempdir_in(&c.state_dir)?;
+    let directory = tempfile::tempdir_in(&c.state_dir).with_context(|| {
+        format!(
+            "create signing/verification temporary directory in {}",
+            c.state_dir.display()
+        )
+    })?;
     let input = directory.path().join("unsigned.zone");
     let output = directory.path().join("signed.zone");
     let mut source = unsigned.to_owned();
     for key in &zone_config.keys {
+        let private_path = format!("{}.private", key.display());
+        let public_path = format!("{}.key", key.display());
         ensure!(
-            fs::metadata(format!("{}.private", key.display()))?.is_file(),
-            "private signing key is not a file"
+            fs::metadata(&private_path)
+                .with_context(|| format!("inspect private signing key {private_path}"))?
+                .is_file(),
+            "private signing key is not a file: {private_path}"
         );
         source.push_str(
-            &fs::read_to_string(format!("{}.key", key.display()))
-                .context("read public signing key")?,
+            &fs::read_to_string(&public_path)
+                .with_context(|| format!("read public signing key {public_path}"))?,
         );
         source.push('\n');
     }
-    fs::write(&input, source)?;
+    fs::write(&input, source)
+        .with_context(|| format!("write signing input {}", input.display()))?;
 
     let mut args: Vec<OsString> = [
         "-q",   // quiet
@@ -237,7 +268,8 @@ fn sign_zone_file(c: &Config, zone_config: &ZoneConfig, unsigned: &str) -> Resul
         Duration::from_secs(120), // cap signing
     )
     .with_context(|| format!("sign zone {}", zone_config.name))?;
-    let signed = fs::read_to_string(&output)?;
+    let signed = fs::read_to_string(&output)
+        .with_context(|| format!("read signed zone {}", output.display()))?;
     verify_signed_zone(c, zone_config, &signed)?;
     Ok(signed)
 }
@@ -265,8 +297,12 @@ fn next_serial(last: u32, date: time::Date) -> Result<u32> {
 fn next_collection_id(root: &std::path::Path) -> Result<u64> {
     let mut id = u64::try_from(time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000)?;
     if root.exists() {
-        for entry in fs::read_dir(root)? {
-            let filename = entry?.file_name();
+        for entry in
+            fs::read_dir(root).with_context(|| format!("list collections in {}", root.display()))?
+        {
+            let filename = entry
+                .with_context(|| format!("read directory entry in {}", root.display()))?
+                .file_name();
             let filename = filename.to_string_lossy();
             if let Ok(previous) = filename
                 .trim_start_matches('.')
@@ -301,7 +337,8 @@ fn prepare_zone_files(
         let unsigned = zone_data.render_with_serial(serial);
         validate_with_bind(c, &zone.name, &unsigned)?;
         let final_zone = if zone.sign {
-            sign_zone_file(c, zone, &unsigned)?
+            sign_zone_file(c, zone, &unsigned)
+                .with_context(|| format!("prepare signed zone {}", zone.name))?
         } else {
             unsigned.clone()
         };
@@ -377,16 +414,37 @@ fn serialize_collection(package: &CollectionPackage) -> Result<BTreeMap<String, 
 /// Persist an immutable package; the caller owns serial reservation and selection.
 fn save_collection(c: &Config, id: u64, files: BTreeMap<String, Vec<u8>>) -> Result<()> {
     let root = c.state_dir.join("collected");
-    fs::create_dir_all(&root)?;
-    fs::File::open(&c.state_dir)?.sync_all()?;
+    fs::create_dir_all(&root)
+        .with_context(|| format!("create collection directory {}", root.display()))?;
+    fs::File::open(&c.state_dir)
+        .with_context(|| format!("open directory for sync {}", c.state_dir.display()))?
+        .sync_all()
+        .with_context(|| format!("sync directory {}", c.state_dir.display()))?;
     let temporary = root.join(format!(".{id}.tmp"));
-    fs::create_dir(&temporary)?;
+    fs::create_dir(&temporary).with_context(|| {
+        format!(
+            "create temporary collection directory {}",
+            temporary.display()
+        )
+    })?;
     for (name, bytes) in files {
         util::atomic_write(&temporary.join(name), &bytes)?;
     }
-    fs::File::open(&temporary)?.sync_all()?;
-    fs::rename(&temporary, root.join(id.to_string()))?;
-    fs::File::open(&root)?.sync_all()?;
+    fs::File::open(&temporary)
+        .with_context(|| format!("open directory for sync {}", temporary.display()))?
+        .sync_all()
+        .with_context(|| format!("sync directory {}", temporary.display()))?;
+    fs::rename(&temporary, root.join(id.to_string())).with_context(|| {
+        format!(
+            "activate collection {} as {}",
+            temporary.display(),
+            root.join(id.to_string()).display()
+        )
+    })?;
+    fs::File::open(&root)
+        .with_context(|| format!("open directory for sync {}", root.display()))?
+        .sync_all()
+        .with_context(|| format!("sync directory {}", root.display()))?;
     Ok(())
 }
 
@@ -446,7 +504,8 @@ fn fresh_collection_reasons(
 }
 
 pub fn collect(c: &Config) -> Result<()> {
-    fs::create_dir_all(&c.state_dir)?;
+    fs::create_dir_all(&c.state_dir)
+        .with_context(|| format!("create state directory {}", c.state_dir.display()))?;
     log::info!(
         "Collecting {} zones from NetBox view {}",
         c.zones.len(),
@@ -509,7 +568,13 @@ pub fn collect(c: &Config) -> Result<()> {
     let current_path = c.state_dir.join("current.json");
     current.last_serial = package.collection.serial;
     util::atomic_write(&current_path, &serde_json::to_vec_pretty(&current)?)?;
-    save_collection(c, package.collection.id, files)?;
+    save_collection(c, package.collection.id, files).with_context(|| {
+        format!(
+            "save collection {} in {}",
+            package.collection.id,
+            c.state_dir.display()
+        )
+    })?;
     current.collection_id = Some(package.collection.id);
     util::atomic_write(&current_path, &serde_json::to_vec_pretty(&current)?)?;
 
@@ -561,6 +626,8 @@ pub fn publish(c: &Config) -> Result<()> {
         for target in &c.targets {
             if let Err(error) = deployment::install(target, id, contents) {
                 log::error!("{id} to {}: {error:#}", target.name);
+            } else {
+                log::info!("Published {id} to {}", target.name);
             }
         }
     }

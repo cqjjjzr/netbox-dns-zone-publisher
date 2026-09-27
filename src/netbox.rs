@@ -57,6 +57,7 @@ struct Page<T> {
 /// A NetBox source that reads stable normalized zone records.
 pub struct Source {
     client: Client,
+    headers: HeaderMap,
     base: Url,
     max_records: usize,
     collection_timeout: Duration,
@@ -79,18 +80,19 @@ impl Source {
             url.username().is_empty() && url.password().is_none(),
             "NetBox URL credentials are not allowed"
         );
-        let token = fs::read_to_string(&c.token_file).context("read NetBox token file")?;
+        let token = fs::read_to_string(&c.token_file)
+            .with_context(|| format!("read NetBox token file {}", c.token_file.display()))?;
         let mut auth = HeaderValue::from_str(&format!("Token {}", token.trim()))?;
         auth.set_sensitive(true);
         let mut headers = HeaderMap::new();
         headers.insert(AUTHORIZATION, auth);
         let client = Client::builder()
-            .default_headers(headers)
             .redirect(reqwest::redirect::Policy::none())
             .timeout(Duration::from_secs(c.timeout_secs))
             .build()?;
         Ok(Self {
             client,
+            headers,
             base: url.clone(),
             max_records: c.max_records,
             collection_timeout: Duration::from_secs(c.timeout_secs.saturating_mul(4)),
@@ -103,23 +105,47 @@ impl Source {
             "cross-origin collection URL rejected"
         );
         ensure!(Instant::now() < deadline, "collection deadline exceeded");
-        let response = self
+        let request = self
             .client
             .get(url.clone())
+            .headers(self.headers.clone())
             .timeout(
                 deadline
                     .saturating_duration_since(Instant::now())
                     .min(self.request_timeout),
             )
-            .send()
-            .context("NetBox request failed")?;
-        ensure!(
-            response.status().is_success(),
-            "NetBox returned HTTP {}",
-            response.status()
+            .build()
+            .context("build NetBox request")?;
+        log::debug!(
+            "HTTP request: {} {}\nheaders: {:?}\nbody: <empty>",
+            request.method(),
+            request.url(),
+            debug_headers(request.headers())
         );
-        let bytes = crate::util::bounded_read(response)?;
-        serde_json::from_slice(&bytes).context("invalid NetBox JSON/schema")
+        let response = self
+            .client
+            .execute(request)
+            .with_context(|| format!("NetBox request failed: GET {url}"))?;
+        let status = response.status();
+        log::debug!(
+            "HTTP response: GET {url}: {status}\nheaders: {:?}",
+            debug_headers(response.headers())
+        );
+        // Read error bodies too: API validation details explain HTTP 400s.
+        // Retain the same size limit used for successful responses.
+        let bytes = crate::util::bounded_read(response)
+            .with_context(|| format!("read NetBox HTTP {status} response from {url}"))?;
+        log::debug!(
+            "HTTP response body: GET {url}: {status}\n{}",
+            String::from_utf8_lossy(&bytes)
+        );
+        ensure!(
+            status.is_success(),
+            "NetBox returned HTTP {} for GET {url}",
+            status
+        );
+        serde_json::from_slice(&bytes)
+            .with_context(|| format!("invalid NetBox JSON/schema from {url}"))
     }
     pub fn collect(&self, c: &Config) -> Result<Records> {
         let deadline = Instant::now() + self.collection_timeout;
@@ -236,4 +262,20 @@ impl Source {
         );
         Ok(second)
     }
+}
+
+/// Keep credentials out of diagnostic headers, including server cookies.
+fn debug_headers(headers: &HeaderMap) -> HeaderMap {
+    let mut headers = headers.clone();
+    for (name, value) in &mut headers {
+        if value.is_sensitive()
+            || matches!(
+                name.as_str(),
+                "authorization" | "proxy-authorization" | "cookie" | "set-cookie"
+            )
+        {
+            *value = HeaderValue::from_static("<redacted>");
+        }
+    }
+    headers
 }

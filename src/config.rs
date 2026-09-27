@@ -1,4 +1,4 @@
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeSet,
@@ -96,8 +96,12 @@ fn check_program() -> PathBuf {
 
 impl Config {
     pub fn read(path: &Path) -> Result<Config> {
-        let r: Config = toml::from_str(&std::fs::read_to_string(path)?)?;
-        r.validate()?;
+        let text = std::fs::read_to_string(path)
+            .with_context(|| format!("read configuration {}", path.display()))?;
+        let r: Config = toml::from_str(&text)
+            .with_context(|| format!("parse configuration {}", path.display()))?;
+        r.validate()
+            .with_context(|| format!("validate configuration {}", path.display()))?;
         Ok(r)
     }
 

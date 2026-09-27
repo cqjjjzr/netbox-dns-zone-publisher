@@ -51,8 +51,8 @@ fn main() {
         let config = Config::read(&cli.config.context("--config is required")?)?;
         let _lock = StateLock::try_lock(&config.state_dir)?;
         match cli.command {
-            Commands::Collect => publisher::collect(&config)?,
-            Commands::Publish => publisher::publish(&config)?,
+            Commands::Collect => publisher::collect(&config).context("collect failed")?,
+            Commands::Publish => publisher::publish(&config).context("publish failed")?,
         }
         Ok(())
     })();

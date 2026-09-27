@@ -21,7 +21,10 @@ exec sh -s
         r#"
 printf '%s\n' "$@" >> "$0.calls"
 while test "$#" -gt 2; do shift; done
-destination="${2#*:}"
+case "$2" in
+    *\]:*) destination="${2#*]:}" ;;
+    *) destination="${2#*:}" ;;
+esac
 cp -- "$1" "$destination"
 if test -f "$0.corrupt"; then printf corrupt >> "$destination"; fi
 test ! -f "$0.fail"
@@ -47,6 +50,43 @@ fn publish_with_transport_stubs(fixture: &Sandbox) -> Output {
 }
 
 #[test]
+fn ipv6_hosts_are_bracketed_only_for_scp() {
+    for configured in [
+        "dns-publish@2001:200:0:cc02::2:21",
+        "dns-publish@[2001:200:0:cc02::2:21]",
+        "2001:200:0:cc02::2:21",
+        "[2001:200:0:cc02::2:21]",
+    ] {
+        let api = Api::new(&["example.com"]);
+        let mut fixture = Sandbox::new(api.server.url.clone(), &["example.com"]);
+        install_transport_stubs(&mut fixture);
+        fixture.config.targets[0].ssh.as_mut().unwrap().host = configured.into();
+        fixture.config.validate().unwrap();
+        publisher::collect(&fixture.config).unwrap();
+        let output = publish_with_transport_stubs(&fixture);
+        assert!(output.status.success());
+        assert!(
+            !String::from_utf8_lossy(&output.stderr).contains("[ERROR]"),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let user = if configured.contains('@') {
+            "dns-publish@"
+        } else {
+            ""
+        };
+        let ssh = fs::read_to_string(fixture.root.path().join("bin/ssh.calls")).unwrap();
+        let scp = fs::read_to_string(fixture.root.path().join("bin/scp.calls")).unwrap();
+        assert!(ssh.contains(&format!("\n{user}2001:200:0:cc02::2:21\nsh -s\n")));
+        assert!(scp.contains(&format!("\n{user}[2001:200:0:cc02::2:21]:")));
+        assert_eq!(
+            fs::read(fixture.config.targets[0].directory.join("example.com.zone")).unwrap(),
+            fs::read(fixture.package().join("example.com.zone")).unwrap()
+        );
+    }
+}
+
+#[test]
 fn remote_publication_passes_noninteractive_transport_options_and_is_idempotent() {
     let api = Api::new(&["example.com"]);
     let mut fixture = Sandbox::new(api.server.url.clone(), &["example.com"]);
@@ -55,7 +95,7 @@ fn remote_publication_passes_noninteractive_transport_options_and_is_idempotent(
     let output = publish_with_transport_stubs(&fixture);
     assert!(output.status.success());
     assert!(
-        output.stderr.is_empty(),
+        !String::from_utf8_lossy(&output.stderr).contains("[ERROR]"),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );

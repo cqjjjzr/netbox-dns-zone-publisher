@@ -22,17 +22,22 @@ pub fn now() -> u64 {
 pub struct StateLock(File);
 impl StateLock {
     pub fn try_lock(root: &Path) -> Result<StateLock> {
-        fs::create_dir_all(root)?;
+        fs::create_dir_all(root)
+            .with_context(|| format!("create state directory {}", root.display()))?;
+        let lock_path = root.join("lock");
         let f = OpenOptions::new()
             .create(true)
             .truncate(false)
             .read(true)
             .write(true)
-            .open(root.join("lock"))?;
-        f.try_lock().map_err(|error| match error {
-            TryLockError::WouldBlock => anyhow!("another writer holds the state lock"),
-            TryLockError::Error(error) => error.into(),
-        })?;
+            .open(&lock_path)
+            .with_context(|| format!("open state lock {} for writing", lock_path.display()))?;
+        f.try_lock()
+            .map_err(|error| match error {
+                TryLockError::WouldBlock => anyhow!("another writer holds the state lock"),
+                TryLockError::Error(error) => error.into(),
+            })
+            .with_context(|| format!("acquire state lock {}", lock_path.display()))?;
         Ok(StateLock(f))
     }
 }
@@ -50,16 +55,27 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
 }
 
 pub fn atomic_write_with_mode(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
+    atomic_write_inner(path, bytes, mode)
+        .with_context(|| format!("atomically write {}", path.display()))
+}
+
+fn atomic_write_inner(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
     let parent = path.parent().context("missing parent directory")?;
-    fs::create_dir_all(parent)?;
-    let mut temp = tempfile::NamedTempFile::new_in(parent)?;
+    fs::create_dir_all(parent).context("create parent directory")?;
+    let mut temp = tempfile::NamedTempFile::new_in(parent).context("create temporary file")?;
     use std::os::unix::fs::PermissionsExt;
     temp.as_file()
-        .set_permissions(fs::Permissions::from_mode(mode))?;
-    temp.write_all(bytes)?;
-    temp.as_file().sync_all()?;
-    temp.persist(path).map_err(|e| e.error)?;
-    File::open(parent)?.sync_all()?;
+        .set_permissions(fs::Permissions::from_mode(mode))
+        .context("set temporary file permissions")?;
+    temp.write_all(bytes).context("write temporary file")?;
+    temp.as_file().sync_all().context("sync temporary file")?;
+    temp.persist(path)
+        .map_err(|e| e.error)
+        .context("persist temporary file")?;
+    File::open(parent)
+        .context("open parent directory for sync")?
+        .sync_all()
+        .context("sync parent directory")?;
     Ok(())
 }
 
@@ -84,14 +100,30 @@ pub fn command(cmd: &Expression, input: &[u8], timeout: Duration) -> Result<Vec<
         .unchecked();
 
     log::debug!("Executing command: {cmd:?}");
-    let handle = expr.start().context("start subprocess")?;
+    log::debug!("Command stdin:\n{}", String::from_utf8_lossy(input));
+    let handle = expr
+        .start()
+        .with_context(|| format!("start subprocess {cmd:?}"))?;
 
-    let timed_out = handle.wait_timeout(timeout)?.is_none();
+    let timed_out = handle
+        .wait_timeout(timeout)
+        .with_context(|| format!("wait for subprocess {cmd:?}"))?
+        .is_none();
     if timed_out {
-        handle.kill().context("kill timed-out subprocess")?;
+        handle
+            .kill()
+            .with_context(|| format!("kill timed-out subprocess {cmd:?}"))?;
     }
 
-    let mut output = handle.into_output()?;
+    let mut output = handle
+        .into_output()
+        .with_context(|| format!("capture subprocess output {cmd:?}"))?;
+    log::debug!(
+        "Command completed: {cmd:?}\nstatus: {}; timed out: {timed_out}\nstdout:\n{}\nstderr:\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
     if timed_out || !output.status.success() {
         output.stdout.truncate(1_048_576);
         output.stderr.truncate(1_048_576);
@@ -101,7 +133,7 @@ pub fn command(cmd: &Expression, input: &[u8], timeout: Duration) -> Result<Vec<
             format!("subprocess failed ({})", output.status)
         };
         bail!(
-            "{reason}: \nstdout: \n{}\nstderr:\n{}",
+            "{reason}: {cmd:?}\nstdout: \n{}\nstderr:\n{}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr),
         );
