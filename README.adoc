@@ -1,0 +1,130 @@
+= netbox-dns-zone-publisher
+
+A publisher for NetBox DNS and local/remote DNS servers. It reads the NetBox DNS REST API, retains historical normalized collections, optionally signs NSEC or NSEC3 zones, and installs verified zone files locally and using SCP/SSH.
+
+The publisher runs external of NetBox or DNS server in a separate process.
+
+The publisher keep all produced zone and manifest files and deploys the latest collection results. The collection and deployment should be run periodically.
+
+== Build and check
+
+Install Rust and `just`. Run `just` to list the available recipes.
+
+[source,sh]
+----
+just build
+just check test-rust
+# Requires BIND tools (Debian: bind9-utils).
+just test-bind
+----
+
+== Usage
+
+Debian 13 is used as the example.
+
+
+[source,sh]
+----
+sudo apt install bind9-utils openssh-client util-linux coreutils
+----
+
+Install the release binary on the publisher host (may on any host with access to all destination servers). Targets may be local or SSH, in any order. On remote nodes, set up the SSH server and DNS server, and provision the publication account and zone directory as described in link:docs/operations.adoc[operations]. Adapt link:examples/publisher.toml[the example configuration] with NetBox view/zone names, paths and signing keys.
+
+[source,sh]
+----
+netbox-dns-zone-publisher --config /etc/netbox-dns-zone-publisher/publisher.toml collect
+netbox-dns-zone-publisher --config /etc/netbox-dns-zone-publisher/publisher.toml publish
+----
+
+Commands log to stderr, with journald priority prefixes when `JOURNAL_STREAM` is set.
+
+The operation has 2 stages, collect (NetBox → zone file) and publish (zone file → DNS server). The example link:packaging/debian/netbox-dns-zone-publisher.timer[systemd timer] schedules both stages.
+
+See link:docs/operations.adoc[operations and recovery].
+
+== Set up an SSH receiving user
+
+On the publisher, generate a key for the `dns-zone-publisher` service account:
+
+[source,sh]
+----
+sudo install -d -o dns-zone-publisher -g dns-zone-publisher -m 0700 \
+  /var/lib/netbox-dns-zone-publisher/.ssh
+sudo -u dns-zone-publisher ssh-keygen -t ed25519 -N '' \
+  -f /var/lib/netbox-dns-zone-publisher/.ssh/id_ed25519
+sudo cat /var/lib/netbox-dns-zone-publisher/.ssh/id_ed25519.pub
+----
+
+Copy the generated public key to `/path/to/id_ed25519.pub` on each target, then
+run the following there. Replace `coredns` with your DNS server's existing group.
+
+[source,sh]
+----
+sudo apt install openssh-server coreutils
+sudo adduser --system --group --disabled-password --shell /bin/sh \
+  --home /var/lib/dns-publish dns-publish
+sudo install -d -o dns-publish -g dns-publish -m 0700 /var/lib/dns-publish/.ssh
+sudo install -o dns-publish -g dns-publish -m 0600 \
+  /path/to/id_ed25519.pub /var/lib/dns-publish/.ssh/authorized_keys
+sudo install -d -o dns-publish -g coredns -m 2750 /var/lib/coredns/zones
+sudo systemctl enable --now ssh
+----
+
+Set `targets.ssh.host = "dns-publish@ns2.example.com"` and
+`targets.directory = "/var/lib/coredns/zones"` in the publisher configuration.
+
+== Debian packaging
+
+Run the packaging commands on Debian 13 with Rust 1.99.1 or newer and `just` installed:
+
+[source,sh]
+----
+sudo apt update
+sudo apt install dpkg-dev liblzma-dev clang cmake
+cargo install cargo-deb --version 3.8.0 --locked
+just deb
+----
+
+Packages go to `target/debian/`. Debian 13 is the package baseline; building on
+another distribution can produce dependencies unavailable on Debian 13.
+The package includes the checked-in third-party notices.
+
+=== Install and configure
+
+[source,sh]
+----
+sudo apt install ./target/debian/netbox-dns-zone-publisher_0.1.0-1_amd64.deb
+----
+
+The package creates the `dns-zone-publisher` account and installs the systemd
+service and timer without enabling or starting them. See
+link:docs/operations.adoc[operations] for configuration and scheduling.
+
+== CI
+
+The Test workflow runs formatting, Clippy, Rust tests, and the BIND DNSSEC
+integration tests on pull requests and pushes to branches other than `main`.
+Pushes to `main` run the Build workflow: the same checks on Debian 13, followed
+by `cargo-deb`, Lintian, and upload of the `.deb` artifact. CI and local
+development use the same just recipes.
+
+== Repository layout
+
+* `src/` and `tests/`: publisher code and integration tests.
+* `docs/`: AsciiDoc operations guide.
+* `examples/`: publisher configuration and CoreDNS example.
+* `packaging/debian/`: systemd units, maintainer script, and manual page.
+* `Cargo.toml`: Rust dependencies and Debian package metadata.
+* `justfile`: build, check, test, and packaging commands.
+
+== License
+
+MIT. See link:LICENSE[LICENSE] and
+link:THIRD_PARTY_NOTICES.md[third-party dependency notices].
+After updating dependencies, regenerate and commit the notices:
+
+[source,sh]
+----
+cargo install cargo-about --version 0.9.2 --features cli --locked
+just generate-notices
+----

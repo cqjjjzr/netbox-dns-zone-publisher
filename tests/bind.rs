@@ -104,10 +104,10 @@ fn signing_lifecycle(nsec3: bool) {
     );
     let published = fixture.cli("publish");
     assert!(published.status.success());
+    let stderr = String::from_utf8_lossy(&published.stderr);
     assert!(
-        published.stderr.is_empty(),
-        "{}",
-        String::from_utf8_lossy(&published.stderr)
+        !stderr.contains("[WARN]") && !stderr.contains("[ERROR]"),
+        "{stderr}"
     );
     let records = dns::parse("example.com", &signed).unwrap();
     for (owner, kind, value) in unusual {
@@ -178,10 +178,10 @@ fn signing_lifecycle(nsec3: bool) {
     );
     let published = fixture.cli("publish");
     assert!(published.status.success());
+    let stderr = String::from_utf8_lossy(&published.stderr);
     assert!(
-        published.stderr.is_empty(),
-        "{}",
-        String::from_utf8_lossy(&published.stderr)
+        !stderr.contains("[WARN]") && !stderr.contains("[ERROR]"),
+        "{stderr}"
     );
 }
 

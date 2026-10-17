@@ -1,0 +1,29 @@
+name: Build
+on:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  debian:
+    runs-on: ubuntu-latest
+    container: rust:1.99.1-slim-trixie
+    steps:
+      - uses: actions/checkout@v7
+      - run: apt-get update && apt-get install -y --no-install-recommends dpkg-dev liblzma-dev clang cmake lintian bind9-utils
+      - run: rustup component add rustfmt clippy
+      - uses: Swatinem/rust-cache@v2
+      - uses: extractions/setup-just@v4
+        with:
+          just-version: '1.59.0'
+      - run: just check test-rust test-bind
+      - run: cargo install cargo-deb --version 3.8.0 --locked
+      - run: just deb
+      - run: lintian --fail-on error target/debian/*.deb
+      - uses: actions/upload-artifact@v7
+        with:
+          name: netbox-dns-zone-publisher-debian13-amd64
+          path: target/debian/*.deb
+          if-no-files-found: error
+          retention-days: 90
+          compression-level: 0

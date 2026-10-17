@@ -1,0 +1,16 @@
+# Third-party notices
+
+netbox-dns-zone-publisher is built from the crates below.
+
+Generated with `just generate-notices`.
+
+{{#each licenses}}
+## {{{name}}}
+
+Used by: {{#each used_by}}{{crate.name}} {{crate.version}}{{#unless @last}}, {{/unless}}{{/each}}
+
+```text
+{{{text}}}
+```
+
+{{/each}}
