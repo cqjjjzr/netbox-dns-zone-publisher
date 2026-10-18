@@ -2,6 +2,12 @@ name: Build
 on:
   push:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      release:
+        description: Publish a new versioned GitHub release
+        type: boolean
+        default: false
 permissions:
   contents: read
 jobs:
@@ -27,3 +33,41 @@ jobs:
           if-no-files-found: error
           retention-days: 90
           compression-level: 0
+  release:
+    if: github.event_name == 'workflow_dispatch' && inputs.release
+    needs: debian
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: publish-release
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v7
+        with:
+          name: netbox-dns-zone-publisher-debian13-amd64
+          path: build
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          VERSION=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')
+          CHANGE_ID=$(git cat-file commit "$GITHUB_SHA" | sed -n '/^$/q; s/^change-id //p')
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          [[ "$CHANGE_ID" =~ ^[k-z]{32}$ ]]
+          TAG="v$VERSION"
+          printf 'Version: %s\njj change: %s\nGit commit: %s\n' \
+            "$VERSION" "$CHANGE_ID" "$GITHUB_SHA" > "$RUNNER_TEMP/release-notes.md"
+          gh api --paginate "repos/$GH_REPO/releases" --jq '.[].tag_name' > "$RUNNER_TEMP/release-tags"
+          if grep -Fxq "$TAG" "$RUNNER_TEMP/release-tags"; then
+            echo "Release $TAG already exists" >&2
+            exit 1
+          fi
+          # Reserve the tag atomically; never reuse or move an existing tag.
+          gh api --method POST "repos/$GH_REPO/git/refs" \
+            -f "ref=refs/tags/$TAG" -f "sha=$GITHUB_SHA" --silent
+          gh release create "$TAG" build/*.deb --verify-tag \
+            --target "$GITHUB_SHA" --title "$TAG" \
+            --notes-file "$RUNNER_TEMP/release-notes.md"
